@@ -161,16 +161,26 @@ def safety_gate(token_mint: str):
         return {"verdict": "REJECT", "reason": ext_verdict}
 
     market_data = get_token_market_cap(token_mint)
+    fdv = None
+    threshold = 30
+    liquidity = 0
+
     if market_data and market_data.get("fdv"):
-        fdv = float(market_data["fdv"])
+        try:
+            fdv = float(market_data["fdv"])
+        except (ValueError, TypeError):
+            fdv = None
         threshold = get_concentration_threshold(fdv)
-        print(f"Symbol:           {market_data.get('symbol', '?')}")
-        print(f"FDV:              ${fdv:,.0f}")
-        print(f"Ликвидность:      ${market_data['liquidity_usd']:,.0f}")
+        liquidity = market_data.get("liquidity_usd", 0) or 0
+        symbol = market_data.get("symbol", "?")
+        print(f"Symbol:           {symbol}")
+        if fdv is not None:
+            print(f"FDV:              ${fdv:,.0f}")
+        else:
+            print(f"FDV:              неизвестно")
+        print(f"Ликвидность:      ${liquidity:,.0f}")
         print(f"Порог топ-10:     {threshold}%")
     else:
-        fdv = None
-        threshold = 30
         print(f"⚠️  Не удалось получить FDV, использую жёсткий порог {threshold}%")
 
     holders = get_largest_holders(token_mint)
@@ -182,7 +192,7 @@ def safety_gate(token_mint: str):
             print(f"Топ-10 холдеров:  {concentration:.2f}% supply")
 
             if concentration > threshold:
-                fdv_str = f"${fdv:,.0f}" if fdv else "неизвестно"
+                fdv_str = f"${fdv:,.0f}" if fdv is not None else "неизвестно"
                 return {
                     "verdict": "REJECT",
                     "reason": (

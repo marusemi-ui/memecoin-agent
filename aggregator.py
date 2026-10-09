@@ -7,16 +7,11 @@ import os
 import time
 from dotenv import load_dotenv
 
-# Импортируем наши узлы
 from safety_gate import safety_gate
 from smart_money import analyze_wallet
 
 load_dotenv()
 
-
-# ─────────────────────────────────────────────
-# Веса узлов (можно тюнить)
-# ─────────────────────────────────────────────
 
 WEIGHTS = {
     "safety": 0.40,
@@ -27,10 +22,6 @@ WEIGHTS = {
 SIGNAL_THRESHOLD = 0.65
 
 
-# ─────────────────────────────────────────────
-# Оценка каждого узла (0.0 – 1.0)
-# ─────────────────────────────────────────────
-
 def score_safety(safety_result: dict) -> float:
     if safety_result["verdict"] == "REJECT":
         return 0.0
@@ -40,10 +31,10 @@ def score_safety(safety_result: dict) -> float:
 
 
 def score_smart_money(sm_result: dict) -> float:
-    stats = sm_result.get("stats", {})
+    stats = sm_result.get("stats", {}) or {}
     win_rate = stats.get("win_rate")
     total_pnl = stats.get("total_pnl_sol")
-    closed = stats.get("closed_with_sol", 0)
+    closed = stats.get("closed_with_sol", 0) or 0
 
     if not closed or win_rate is None:
         return 0.3
@@ -79,10 +70,6 @@ def score_liquidity(safety_result: dict) -> float:
     return 0.7
 
 
-# ─────────────────────────────────────────────
-# Главная функция
-# ─────────────────────────────────────────────
-
 def evaluate_signal(token_mint: str, wallet_address: str) -> dict:
     print(f"\n{'=' * 65}")
     print(f"🎯 ОЦЕНКА СИГНАЛА")
@@ -90,7 +77,6 @@ def evaluate_signal(token_mint: str, wallet_address: str) -> dict:
     print(f"   Кошелёк: {wallet_address}")
     print(f"{'=' * 65}\n")
 
-    # ─── Узел 1: Safety Gate ───
     print("🛡️  Шаг 1: Safety Gate...")
     safety_result = safety_gate(token_mint)
     safety_score = score_safety(safety_result)
@@ -106,18 +92,16 @@ def evaluate_signal(token_mint: str, wallet_address: str) -> dict:
                 "safety": 0.0,
                 "smart_money": None,
                 "liquidity": None,
-            }
+            },
+            "smart_money_stats": {},
         }
 
-    # ─── Узел 2: Smart Money ───
     print(f"\n🧠 Шаг 2: Smart Money анализ кошелька...")
     sm_result = analyze_wallet(wallet_address)
     smart_score = score_smart_money(sm_result)
 
-    # ─── Узел 3: Ликвидность ───
     liq_score = score_liquidity(safety_result)
 
-    # ─── Агрегация ───
     confidence = (
         safety_score * WEIGHTS["safety"]
         + smart_score * WEIGHTS["smart_money"]
@@ -156,26 +140,9 @@ def evaluate_signal(token_mint: str, wallet_address: str) -> dict:
             "liquidity": round(liq_score, 2),
         },
         "safety_reason": safety_result["reason"],
-        "smart_money_stats": sm_result.get("stats", {}),
+        "smart_money_stats": sm_result.get("stats", {}) or {},
     }
 
 
-# ─────────────────────────────────────────────
-# Тестовый запуск
-# ─────────────────────────────────────────────
-
 if __name__ == "__main__":
-    test_token = "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263"
-    test_wallet = "DhGTwErJvS6vVjnbxAqzaeGjPHY632LWEHwv5PiXGDoJ"
-
-    result = evaluate_signal(test_token, test_wallet)
-
-    print(f"\n{'=' * 65}")
-    print(f"Вердикт:     {result['verdict']}")
-    print(f"Confidence:  {result['confidence']}")
-    print(f"Причина:     {result['reason']}")
-    if result.get("breakdown"):
-        print(f"\nРазбивка:")
-        for k, v in result["breakdown"].items():
-            print(f"  {k}: {v}")
-    print(f"{'=' * 65}\n")
+    pass

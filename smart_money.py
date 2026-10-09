@@ -312,7 +312,11 @@ def analyze_wallet(address):
 
     txs = fetch_all_swaps(address, max_pages=5)
     if not txs:
-        return {"verdict": "UNKNOWN", "reason": "Не удалось загрузить транзакции"}
+        return {
+            "verdict": "UNKNOWN",
+            "reason": "Не удалось загрузить транзакции",
+            "stats": {},
+        }
 
     print(f"\n📊 Всего свопов: {len(txs)}")
 
@@ -393,9 +397,12 @@ def analyze_wallet(address):
             name = get_token_name(pos["token"])
             dt = time.strftime("%Y-%m-%d", time.localtime(pos["first_buy_ts"]))
 
-            if pos["unrealized_pnl_sol"] is not None:
-                pnl_str = f"{pos['unrealized_pnl_sol']:+.4f} SOL ({pos['unrealized_pnl_pct']:+.1f}%)"
-            else:
+            try:
+                if pos["unrealized_pnl_sol"] is not None and pos["unrealized_pnl_pct"] is not None:
+                    pnl_str = f"{pos['unrealized_pnl_sol']:+.4f} SOL ({pos['unrealized_pnl_pct']:+.1f}%)"
+                else:
+                    pnl_str = "нет цены"
+            except (TypeError, ValueError):
                 pnl_str = "нет цены"
 
             print(
