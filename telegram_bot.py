@@ -28,6 +28,36 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def fmt_score(value):
+    """Безопасно форматирует число или возвращает '—'."""
+    if value is None:
+        return "—"
+    try:
+        return f"{float(value):.2f}"
+    except (TypeError, ValueError):
+        return "—"
+
+
+def fmt_percent(value):
+    """Безопасно форматирует процент."""
+    if value is None:
+        return "—"
+    try:
+        return f"{float(value):.1f}%"
+    except (TypeError, ValueError):
+        return "—"
+
+
+def fmt_sol(value):
+    """Безопасно форматирует SOL."""
+    if value is None:
+        return "—"
+    try:
+        return f"{float(value):+.4f} SOL"
+    except (TypeError, ValueError):
+        return "—"
+
+
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 Привет! Я агент для анализа мемкоинов.\n\n"
@@ -70,10 +100,11 @@ async def cmd_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         result = evaluate_signal(token_mint, wallet_address)
 
-        verdict = result["verdict"]
-        confidence = result["confidence"]
-        breakdown = result.get("breakdown", {})
-        sm_stats = result.get("smart_money_stats", {})
+        verdict = result.get("verdict", "UNKNOWN")
+        confidence = result.get("confidence", 0.0) or 0.0
+        breakdown = result.get("breakdown", {}) or {}
+        sm_stats = result.get("smart_money_stats", {}) or {}
+        reason = result.get("reason", "")
 
         emoji = {
             "SIGNAL": "🚀",
@@ -84,22 +115,26 @@ async def cmd_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         text = (
             f"{emoji} Вердикт: {verdict}\n"
-            f"Confidence: {confidence:.3f}\n\n"
-            f"📊 Разбивка:\n"
-            f"├ Safety:      {breakdown.get('safety', 0):.2f}\n"
-            f"├ Smart Money: {breakdown.get('smart_money', 0):.2f}\n"
-            f"└ Liquidity:   {breakdown.get('liquidity', 0):.2f}\n\n"
+            f"Confidence: {confidence:.3f}\n"
         )
 
-        if sm_stats:
-            win_rate = sm_stats.get('win_rate')
-            pnl = sm_stats.get('total_pnl_sol')
+        if reason:
+            text += f"\n💬 {reason}\n"
+
+        text += (
+            f"\n📊 Разбивка:\n"
+            f"├ Safety:      {fmt_score(breakdown.get('safety'))}\n"
+            f"├ Smart Money: {fmt_score(breakdown.get('smart_money'))}\n"
+            f"└ Liquidity:   {fmt_score(breakdown.get('liquidity'))}\n"
+        )
+
+        if sm_stats and sm_stats.get('closed_with_sol') is not None:
             text += (
-                f"🧠 Smart Money:\n"
-                f"├ Покупок:  {sm_stats.get('buys', 0)}\n"
-                f"├ Продаж:   {sm_stats.get('sells', 0)}\n"
-                f"├ Win rate: {win_rate if win_rate is not None else '—'}%\n"
-                f"└ PnL:      {pnl if pnl is not None else '—'} SOL\n"
+                f"\n🧠 Smart Money:\n"
+                f"├ Покупок:  {sm_stats.get('buys', '—')}\n"
+                f"├ Продаж:   {sm_stats.get('sells', '—')}\n"
+                f"├ Win rate: {fmt_percent(sm_stats.get('win_rate'))}\n"
+                f"└ PnL:      {fmt_sol(sm_stats.get('total_pnl_sol'))}\n"
             )
 
         await msg.edit_text(text)
