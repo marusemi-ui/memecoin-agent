@@ -194,10 +194,10 @@ async def cmd_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if tokens:
                 text += f"\n🪙 Топ-5 по стоимости:\n"
                 for t in tokens[:5]:
-                    name = t.get("mint", "")[:8]
+                    name = t.get("name") or t.get("mint", "")[:8]
                     amount = t.get("amount", 0)
                     value_usd = t.get("value_usd", 0)
-                    text += f"├ {name}... — {fmt_amount(amount)} tok ({fmt_usd(value_usd)})\n"
+                    text += f"├ {name} — {fmt_amount(amount)} tok ({fmt_usd(value_usd)})\n"
 
                 if len(tokens) > 5:
                     text += f"└ ... и ещё {len(tokens) - 5}\n"
