@@ -78,6 +78,11 @@ def get_fresh_pumpfun_tokens(limit: int = TOP_TOKENS_LIMIT):
 
 
 def get_token_traders(token_mint: str, limit: int = 30):
+    """
+    Возвращает покупателей и продавцов через OWNER-адреса.
+    Это ВАЖНО: в Solana есть Token Accounts (хранилища токенов) и Owners (кошельки).
+    Нам нужны Owners — у них есть история транзакций.
+    """
     payload = {
         "jsonrpc": "2.0", "id": 1,
         "method": "getSignaturesForAddress",
@@ -90,12 +95,15 @@ def get_token_traders(token_mint: str, limit: int = 30):
         signatures = data.get("result", [])
         if not signatures:
             return [], []
+
         buyers = set()
         sellers = set()
+
         for sig_info in signatures[:15]:
             sig = sig_info.get("signature")
             if not sig:
                 continue
+
             tx_payload = {
                 "jsonrpc": "2.0", "id": 1,
                 "method": "getTransaction",
@@ -107,35 +115,40 @@ def get_token_traders(token_mint: str, limit: int = 30):
                 result = tx_data.get("result")
                 if not result:
                     continue
+
                 meta = result.get("meta", {})
                 post_balances = meta.get("postTokenBalances", [])
                 pre_balances = meta.get("preTokenBalances", [])
-                pre_map = {b.get("accountIndex"): float(b.get("uiTokenAmount", {}).get("uiAmount") or 0) for b in pre_balances}
-                post_map = {b.get("accountIndex"): float(b.get("uiTokenAmount", {}).get("uiAmount") or 0) for b in post_balances}
-                account_keys = result.get("transaction", {}).get("message", {}).get("accountKeys", [])
-                all_indices = set(list(pre_map.keys()) + list(post_map.keys()))
-                for idx_str in all_indices:
-                    try:
-                        idx = int(idx_str)
-                    except (ValueError, TypeError):
-                        continue
-                    pre_amt = pre_map.get(idx_str, 0)
-                    post_amt = post_map.get(idx_str, 0)
-                    if idx >= len(account_keys):
-                        continue
-                    account = account_keys[idx]
-                    pubkey = account.get("pubkey") if isinstance(account, dict) else account
-                    if not pubkey:
-                        continue
+
+                # КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: берём OWNER, а не account_index
+                pre_map = {}
+                for b in pre_balances:
+                    owner = b.get("owner")
+                    if owner:
+                        pre_map[owner] = float(b.get("uiTokenAmount", {}).get("uiAmount") or 0)
+
+                post_map = {}
+                for b in post_balances:
+                    owner = b.get("owner")
+                    if owner:
+                        post_map[owner] = float(b.get("uiTokenAmount", {}).get("uiAmount") or 0)
+
+                for owner in post_map:
+                    pre_amt = pre_map.get(owner, 0)
+                    post_amt = post_map[owner]
                     if post_amt > pre_amt:
-                        buyers.add(pubkey)
+                        buyers.add(owner)
                     elif post_amt < pre_amt and pre_amt > 0:
-                        sellers.add(pubkey)
+                        sellers.add(owner)
+
             except Exception as e:
                 logger.debug(f"Ошибка парсинга tx: {e}")
                 continue
+
             time.sleep(0.1)
+
         return list(buyers), list(sellers)
+
     except Exception as e:
         logger.error(f"Ошибка get_token_traders: {e}")
         return [], []
@@ -155,6 +168,7 @@ def find_candidates(tokens: list):
                 wallet_data[w] = {"count": 0, "role": "buyer", "tokens": []}
             wallet_data[w]["count"] += 1
             wallet_data[w]["tokens"].append(symbol)
+
         for w in sellers:
             if w not in wallet_data:
                 wallet_data[w] = {"count": 0, "role": "seller", "tokens": []}
@@ -162,6 +176,7 @@ def find_candidates(tokens: list):
                 wallet_data[w]["role"] = "both"
             wallet_data[w]["count"] += 1
             wallet_data[w]["tokens"].append(symbol)
+
         time.sleep(0.3)
 
     role_priority = {"both": 0, "seller": 1, "buyer": 2}
