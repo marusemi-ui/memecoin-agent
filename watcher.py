@@ -7,7 +7,6 @@ Watcher — фоновый мониторинг кошельков.
 import os
 import json
 import time
-import asyncio
 import logging
 import requests
 from dotenv import load_dotenv
@@ -28,20 +27,15 @@ WATCH_FILE = "watched_wallets.json"
 BASE_URL = "https://api.helius.xyz/v0/addresses/{address}/transactions"
 SOL_MINT = "So11111111111111111111111111111111111111112"
 
-# Интервал проверки (в секундах)
 CHECK_INTERVAL = 300  # 5 минут
+
 
 # ─────────────────────────────────────────────
 # НАСТРОЙКИ ФИЛЬТРАЦИИ
 # ─────────────────────────────────────────────
 
-# Присылать ли WEAK-сигналы (0.45 ≤ confidence < 0.65)
 NOTIFY_WEAK = True
-
-# Присылать ли IGNORE-сигналы (confidence < 0.45)
 NOTIFY_IGNORE = False
-
-# Присылать ли REJECT-сигналы (Safety Gate отклонил)
 NOTIFY_REJECT = False
 
 
@@ -179,7 +173,6 @@ def notify_new_buy(wallet: str, buy_info: dict):
 
     logger.info(f"🔔 Новая покупка: {wallet[:8]}... купил {token[:8]}...")
 
-    # Прогоняем через агента
     try:
         result = evaluate_signal(token, wallet)
 
@@ -188,7 +181,7 @@ def notify_new_buy(wallet: str, buy_info: dict):
         breakdown = result.get("breakdown", {}) or {}
         sm_stats = result.get("smart_money_stats", {}) or {}
 
-        # ─── ФИЛЬТРАЦИЯ ───
+        # ─── Фильтрация ───
         if verdict == "REJECT" and not NOTIFY_REJECT:
             logger.info(f"⏭️  REJECT отфильтрован: {token[:8]}...")
             return
@@ -218,7 +211,6 @@ def notify_new_buy(wallet: str, buy_info: dict):
                 return "—"
 
         if verdict == "SIGNAL":
-            # Полный отчёт для сильного сигнала
             text = (
                 f"{emoji} СИЛЬНЫЙ СИГНАЛ!\n"
                 f"Confidence: {confidence:.3f}\n\n"
@@ -240,11 +232,11 @@ def notify_new_buy(wallet: str, buy_info: dict):
                     f"└ PnL:      {pnl if pnl is not None else '—'} SOL\n"
                 )
         else:
-            # Краткий отчёт для WEAK/IGNORE
+            # Краткий отчёт с ПОЛНЫМ адресом токена
             text = (
                 f"{emoji} Слабый сигнал ({verdict})\n"
                 f"Confidence: {confidence:.3f}\n\n"
-                f"🪙 Токен: {token[:12]}...\n"
+                f"🪙 Токен: {token}\n"
                 f"💰 Потрачено: {sol_amount:.4f} SOL\n"
             )
 
