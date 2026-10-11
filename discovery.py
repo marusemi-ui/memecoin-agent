@@ -1,12 +1,10 @@
 """
-Discovery — автопоиск «умных кошельков».
-Алгоритм:
-1. Берём топ-20 токенов по объёму за 24ч (DexScreener)
-2. Для каждого токена вытаскиваем крупных покупателей (Helius)
-3. Считаем, сколько разных токенов купил каждый кошелёк
-4. Прогоняем кандидатов через Smart Money (PnL, win rate)
-5. Отсеиваем ботов и убыточных
-6. Возвращаем топ-5
+Discovery — автопоиск «умных кошельков» из трёх источников:
+  А) Покупатели топ-токенов (пассивные холдеры)
+  Б) Продавцы топ-токенов (активные трейдеры)
+  В) Top Traders из DexScreener (verified)
+
+Все кандидаты объединяются и прогоняются через Smart Money.
 """
 
 import os
@@ -25,54 +23,40 @@ if not HELIUS_API_KEY:
 
 logger = logging.getLogger(__name__)
 
-BASE_URL = "https://api.helius.xyz/v0/addresses/{address}/transactions"
 RPC_URL = f"https://mainnet.helius-rpc.com/?api-key={HELIUS_API_KEY}"
 SOL_MINT = "So11111111111111111111111111111111111111112"
 
-# Настройки поиска
-TOP_TOKENS_LIMIT = 10        # сколько топовых токенов проверять
-MIN_TOKEN_APPEARANCE = 2     # минимум токенов, чтобы считать кошелёк активным
-MIN_WIN_RATE = 40.0          # минимальный win rate
-MIN_PNL_SOL = 0.0            # минимальный PnL в SOL
-MAX_TRADES_PER_DAY = 200     # больше = бот
-MAX_CANDIDATES = 30          # максимум кандидатов для анализа
+# Настройки
+TOP_TOKENS_LIMIT = 10
+MIN_TOKEN_APPEARANCE = 2
+MIN_WIN_RATE = 30.0
+MAX_TRADES_PER_DAY = 300
+MAX_CANDIDATES = 30
+MAX_VALIDATE = 20
 
 
 # ─────────────────────────────────────────────
-# 1. Топ токенов через DexScreener
+# 1. Топ токенов (DexScreener)
 # ─────────────────────────────────────────────
 
 def get_top_tokens(limit: int = TOP_TOKENS_LIMIT):
-    """
-    Возвращает список топовых токенов по объёму за 24ч.
-    Использует публичный DexScreener API (без ключа).
-    """
-    # У DexScreener нет публичного "top tokens" эндпоинта.
-    # Но можно взять токены через поиск по популярным парам.
-    # Используем неофициальный эндпоинт.
-
     url = "https://api.dexscreener.com/latest/dex/search?q=SOL"
     try:
         r = requests.get(url, timeout=15)
         r.raise_for_status()
         data = r.json()
-
         pairs = data.get("pairs", [])
 
-        # Фильтруем: только Solana, только с ликвидностью > $50k
         sol_pairs = [
             p for p in pairs
             if p.get("chainId") == "solana"
             and float(p.get("liquidity", {}).get("usd", 0) or 0) > 50_000
         ]
-
-        # Сортируем по объёму за 24ч
         sol_pairs.sort(
             key=lambda p: float(p.get("volume", {}).get("h24", 0) or 0),
             reverse=True,
         )
 
-        # Достаём уникальные mint-адреса
         seen = set()
         tokens = []
         for p in sol_pairs:
@@ -83,31 +67,23 @@ def get_top_tokens(limit: int = TOP_TOKENS_LIMIT):
                     "mint": mint,
                     "symbol": p.get("baseToken", {}).get("symbol", "?"),
                     "volume_24h": float(p.get("volume", {}).get("h24", 0) or 0),
-                    "liquidity": float(p.get("liquidity", {}).get("usd", 0) or 0),
                 })
             if len(tokens) >= limit:
                 break
-
         return tokens
-
     except Exception as e:
-        logger.error(f"Ошибка получения топ токенов: {e}")
+        logger.error(f"Ошибка топ токенов: {e}")
         return []
 
 
 # ─────────────────────────────────────────────
-# 2. Покупатели токена через Helius
+# 2A + 2B. Покупатели И продавцы токена
 # ─────────────────────────────────────────────
 
-def get_token_buyers(token_mint: str, limit: int = 50):
+def get_token_traders(token_mint: str, limit: int = 30):
     """
-    Возвращает список адресов, которые купили токен.
-    Использует Helius Enhanced Transactions API.
+    Возвращает два списка: тех, кто купил токен (buyers) и тех, кто продал (sellers).
     """
-    # Для токена мы не можем напрямую запросить транзакции.
-    # Helius Enhanced работает по адресу кошелька.
-    # Поэтому используем RPC: getSignaturesForAddress для самого токена.
-
     payload = {
         "jsonrpc": "2.0",
         "id": 1,
@@ -118,14 +94,14 @@ def get_token_buyers(token_mint: str, limit: int = 50):
         r = requests.post(RPC_URL, json=payload, timeout=20)
         r.raise_for_status()
         data = r.json()
-
         signatures = data.get("result", [])
         if not signatures:
-            return []
+            return [], []
 
-        # Для каждой подписи получаем транзакцию, ищем покупателей
         buyers = set()
-        for sig_info in signatures[:20]:  # ограничиваем — экономим кредиты
+        sellers = set()
+
+        for sig_info in signatures[:15]:
             sig = sig_info.get("signature")
             if not sig:
                 continue
@@ -142,12 +118,10 @@ def get_token_buyers(token_mint: str, limit: int = 50):
             try:
                 tx_r = requests.post(RPC_URL, json=tx_payload, timeout=15)
                 tx_data = tx_r.json()
-
                 result = tx_data.get("result")
                 if not result:
                     continue
 
-                # Ищем pre/post token balances: у кого вырос баланс этого токена
                 meta = result.get("meta", {})
                 post_balances = meta.get("postTokenBalances", [])
                 pre_balances = meta.get("preTokenBalances", [])
@@ -155,91 +129,140 @@ def get_token_buyers(token_mint: str, limit: int = 50):
                 pre_map = {b.get("accountIndex"): float(b.get("uiTokenAmount", {}).get("uiAmount") or 0) for b in pre_balances}
                 post_map = {b.get("accountIndex"): float(b.get("uiTokenAmount", {}).get("uiAmount") or 0) for b in post_balances}
 
-                # Ищем аккаунты, у которых баланс вырос
                 account_keys = result.get("transaction", {}).get("message", {}).get("accountKeys", [])
 
-                for idx_str, post_amount in post_map.items():
+                all_indices = set(list(pre_map.keys()) + list(post_map.keys()))
+                for idx_str in all_indices:
                     try:
                         idx = int(idx_str)
                     except (ValueError, TypeError):
                         continue
 
-                    pre_amount = pre_map.get(idx_str, 0)
-                    if post_amount > pre_amount and idx < len(account_keys):
-                        account = account_keys[idx]
-                        # account может быть dict (jsonParsed) или str
-                        if isinstance(account, dict):
-                            pubkey = account.get("pubkey")
-                        else:
-                            pubkey = account
-                        if pubkey:
-                            buyers.add(pubkey)
+                    pre_amt = pre_map.get(idx_str, 0)
+                    post_amt = post_map.get(idx_str, 0)
+
+                    if idx >= len(account_keys):
+                        continue
+
+                    account = account_keys[idx]
+                    pubkey = account.get("pubkey") if isinstance(account, dict) else account
+                    if not pubkey:
+                        continue
+
+                    if post_amt > pre_amt:
+                        buyers.add(pubkey)
+                    elif post_amt < pre_amt and pre_amt > 0:
+                        sellers.add(pubkey)
+
             except Exception as e:
-                logger.debug(f"Ошибка парсинга tx {sig[:8]}: {e}")
+                logger.debug(f"Ошибка парсинга tx: {e}")
                 continue
 
-            time.sleep(0.1)  # не долбим RPC
+            time.sleep(0.1)
 
-        return list(buyers)
+        return list(buyers), list(sellers)
 
     except Exception as e:
-        logger.error(f"Ошибка получения покупателей {token_mint[:8]}: {e}")
+        logger.error(f"Ошибка get_token_traders: {e}")
+        return [], []
+
+
+# ─────────────────────────────────────────────
+# 2В. Top Traders из DexScreener
+# ─────────────────────────────────────────────
+
+def get_top_traders_dexscreener(token_mint: str):
+    """
+    Пытается получить топ-трейдеров токена через DexScreener.
+    Возвращает список адресов или пустой список, если данных нет.
+    """
+    # DexScreener не даёт публичный API для Top Traders напрямую.
+    # Но есть страница токена: /solana/<pair_address>
+    # Мы можем получить пары для токена и посмотреть на их страницы.
+    url = f"https://api.dexscreener.com/latest/dex/tokens/{token_mint}"
+    try:
+        r = requests.get(url, timeout=10)
+        r.raise_for_status()
+        data = r.json()
+        pairs = data.get("pairs", [])
+        if not pairs:
+            return []
+
+        # Пока DexScreener не отдаёт список трейдеров — возвращаем пусто.
+        # Здесь мы оставим заглушку, чтобы структура была готова.
+        return []
+
+    except Exception as e:
+        logger.error(f"Ошибка DexScreener Top Traders: {e}")
         return []
 
 
 # ─────────────────────────────────────────────
-# 3. Считаем частоту покупок
+# 3. Поиск активных кандидатов
 # ─────────────────────────────────────────────
 
-def find_active_buyers(tokens: list, min_appearance: int = MIN_TOKEN_APPEARANCE):
+def find_candidates(tokens: list):
     """
-    Находит кошельки, которые купили несколько разных токенов из топа.
+    Собирает кандидатов из трёх источников.
+    Возвращает dict: wallet -> {"count": N, "role": "buyer"/"seller"/"both", "tokens": [...]}
     """
-    wallet_counts = {}
+    wallet_data = {}
 
     for i, token in enumerate(tokens):
         mint = token["mint"]
         symbol = token["symbol"]
-        logger.info(f"  [{i+1}/{len(tokens)}] Ищу покупателей {symbol}...")
+        logger.info(f"  [{i+1}/{len(tokens)}] Ищу трейдеров {symbol}...")
 
-        buyers = get_token_buyers(mint)
-        logger.info(f"    Найдено {len(buyers)} адресов")
+        buyers, sellers = get_token_traders(mint)
+        logger.info(f"    Покупателей: {len(buyers)}, продавцов: {len(sellers)}")
 
-        for wallet in buyers:
-            if wallet not in wallet_counts:
-                wallet_counts[wallet] = {
-                    "count": 0,
-                    "tokens": [],
-                }
-            wallet_counts[wallet]["count"] += 1
-            wallet_counts[wallet]["tokens"].append(symbol)
+        for w in buyers:
+            if w not in wallet_data:
+                wallet_data[w] = {"count": 0, "role": "buyer", "tokens": []}
+            wallet_data[w]["count"] += 1
+            wallet_data[w]["tokens"].append(symbol)
+
+        for w in sellers:
+            if w not in wallet_data:
+                wallet_data[w] = {"count": 0, "role": "seller", "tokens": []}
+            elif wallet_data[w]["role"] == "buyer":
+                wallet_data[w]["role"] = "both"
+            wallet_data[w]["count"] += 1
+            wallet_data[w]["tokens"].append(symbol)
+
+        # Top Traders из DexScreener (пока пусто, но структура готова)
+        top_traders = get_top_traders_dexscreener(mint)
+        for w in top_traders:
+            if w not in wallet_data:
+                wallet_data[w] = {"count": 0, "role": "verified", "tokens": []}
+            wallet_data[w]["count"] += 1
+            wallet_data[w]["tokens"].append(symbol)
 
         time.sleep(0.3)
 
-    # Оставляем тех, кто купил >= min_appearance токенов
+    # Сортируем: сначала "both", потом "seller", потом "verified", потом "buyer"
+    role_priority = {"both": 0, "seller": 1, "verified": 2, "buyer": 3}
+
     active = [
         {
             "wallet": w,
             "count": data["count"],
+            "role": data["role"],
             "tokens": data["tokens"],
         }
-        for w, data in wallet_counts.items()
-        if data["count"] >= min_appearance
+        for w, data in wallet_data.items()
+        if data["count"] >= MIN_TOKEN_APPEARANCE
     ]
 
-    active.sort(key=lambda x: x["count"], reverse=True)
+    active.sort(key=lambda x: (role_priority.get(x["role"], 99), -x["count"]))
     return active[:MAX_CANDIDATES]
 
 
 # ─────────────────────────────────────────────
-# 4. Проверка кандидата через Smart Money
+# 4. Валидация кандидата
 # ─────────────────────────────────────────────
 
 def validate_candidate(wallet: str):
-    """
-    Проверяет кандидата через Smart Money.
-    Возвращает dict с метриками или None, если не подходит.
-    """
     try:
         result = analyze_wallet(wallet)
         stats = result.get("stats", {}) or {}
@@ -247,29 +270,31 @@ def validate_candidate(wallet: str):
         win_rate = stats.get("win_rate")
         pnl = stats.get("total_pnl_sol")
         closed = stats.get("closed_with_sol", 0)
+        open_pos = stats.get("open_positions", 0)
         buys = stats.get("buys", 0)
         sells = stats.get("sells", 0)
 
         total_trades = buys + sells
         trades_per_day = total_trades / 30 if total_trades else 0
 
-        # Отсеиваем ботов
+        # Фильтр ботов
         if trades_per_day > MAX_TRADES_PER_DAY:
-            logger.info(f"    ⏭️  {wallet[:8]}... — бот ({trades_per_day:.0f} сделок/день)")
+            logger.info(f"    ⏭️  {wallet[:8]}... — бот ({trades_per_day:.0f}/день)")
             return None
 
-        # Отсеиваем тех, у кого нет закрытых позиций
-        if not closed or win_rate is None:
-            logger.info(f"    ⏭️  {wallet[:8]}... — нет закрытых позиций")
+        # Разрешаем без закрытых, но с открытыми
+        if not closed and not open_pos:
+            logger.info(f"    ⏭️  {wallet[:8]}... — нет ни закрытых, ни открытых")
             return None
 
-        # Отсеиваем убыточных
-        if win_rate < MIN_WIN_RATE:
+        # Если есть закрытые — проверяем win rate
+        if closed and win_rate is not None and win_rate < MIN_WIN_RATE:
             logger.info(f"    ⏭️  {wallet[:8]}... — win rate {win_rate:.0f}% < {MIN_WIN_RATE}%")
             return None
 
-        if pnl is not None and pnl < MIN_PNL_SOL:
-            logger.info(f"    ⏭️  {wallet[:8]}... — PnL {pnl:.4f} SOL < {MIN_PNL_SOL}")
+        # Проверяем PnL только если есть закрытые
+        if closed and pnl is not None and pnl < 0:
+            logger.info(f"    ⏭️  {wallet[:8]}... — PnL {pnl:.4f} SOL < 0")
             return None
 
         return {
@@ -277,6 +302,7 @@ def validate_candidate(wallet: str):
             "win_rate": win_rate,
             "pnl_sol": pnl,
             "closed": closed,
+            "open_positions": open_pos,
             "buys": buys,
             "sells": sells,
             "trades_per_day": round(trades_per_day, 1),
@@ -291,56 +317,51 @@ def validate_candidate(wallet: str):
 # 5. Главная функция
 # ─────────────────────────────────────────────
 
-def discover_smart_wallets(progress_callback=None):
-    """
-    Главная функция автопоиска.
-    Возвращает список кошельков, прошедших проверку.
-    """
+def discover_smart_wallets():
     logger.info("🔍 Начинаю автопоиск умных кошельков...")
 
-    # 1. Топ токенов
     logger.info("📊 Получаю топ токенов...")
     tokens = get_top_tokens(limit=TOP_TOKENS_LIMIT)
     if not tokens:
         return {"error": "Не удалось получить топ токенов"}
 
     logger.info(f"  Найдено {len(tokens)} токенов")
-    for t in tokens:
-        logger.info(f"    - {t['symbol']}: ${t['volume_24h']:,.0f} объём")
 
-    # 2. Активные покупатели
-    logger.info("👥 Ищу активных покупателей...")
-    candidates = find_active_buyers(tokens, min_appearance=MIN_TOKEN_APPEARANCE)
+    logger.info("👥 Ищу трейдеров (покупателей + продавцов)...")
+    candidates = find_candidates(tokens)
 
     if not candidates:
-        return {"error": "Не найдено активных покупателей"}
+        return {"error": "Не найдено активных кандидатов"}
 
     logger.info(f"  Найдено {len(candidates)} кандидатов")
+    for c in candidates[:10]:
+        logger.info(f"    {c['wallet'][:8]}... — role={c['role']}, токенов={c['count']}")
 
-    # 3. Валидация через Smart Money
-    logger.info("🧠 Проверяю кандидатов через Smart Money...")
+    logger.info("🧠 Проверяю через Smart Money...")
     valid = []
-    for i, cand in enumerate(candidates[:15]):  # максимум 15 на анализ
+    for i, cand in enumerate(candidates[:MAX_VALIDATE]):
         wallet = cand["wallet"]
-        logger.info(f"  [{i+1}] Проверяю {wallet[:8]}... ({cand['count']} токенов)")
+        logger.info(f"  [{i+1}] {wallet[:8]}... ({cand['role']}, {cand['count']} токенов)")
 
         info = validate_candidate(wallet)
         if info:
+            info["role"] = cand["role"]
             info["tokens_bought"] = cand["tokens"]
             valid.append(info)
-            logger.info(
-                f"    ✅ Подходит! Win rate: {info['win_rate']:.0f}%, "
-                f"PnL: {info['pnl_sol']:+.4f} SOL"
-            )
+            logger.info(f"    ✅ win={info['win_rate']}, pnl={info['pnl_sol']}")
+        time.sleep(0.5)
 
-        # Пауза между кандидатами
-        time.sleep(1)
+    # Сортировка: сначала с закрытыми и положительным PnL, потом остальные
+    def sort_key(x):
+        has_closed = 1 if x["closed"] else 0
+        has_pnl = 1 if (x["pnl_sol"] is not None and x["pnl_sol"] > 0) else 0
+        win = x["win_rate"] if x["win_rate"] is not None else 0
+        return (has_closed, has_pnl, win)
 
-    # Сортируем по win rate, потом по PnL
-    valid.sort(key=lambda x: (x["win_rate"], x["pnl_sol"]), reverse=True)
+    valid.sort(key=sort_key, reverse=True)
 
     return {
         "tokens_checked": len(tokens),
         "candidates_found": len(candidates),
-        "valid_wallets": valid[:5],  # топ-5
+        "valid_wallets": valid[:5],
     }
