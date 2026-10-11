@@ -4,6 +4,9 @@ Telegram-бот для агента.
   /start  — приветствие
   /help   — справка
   /check <token> <wallet>  — проверить токен и кошелёк
+  /watch <wallet>          — добавить кошелёк в отслеживание
+  /unwatch <wallet>        — удалить кошелёк из отслеживания
+  /list                    — показать отслеживаемые кошельки
 """
 
 import os
@@ -13,6 +16,7 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 from aggregator import evaluate_signal
+from watcher import add_wallet, remove_wallet, list_wallets
 
 load_dotenv()
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -29,7 +33,7 @@ logger = logging.getLogger(__name__)
 
 
 # ─────────────────────────────────────────────
-# Безопасное форматирование
+# Форматирование
 # ─────────────────────────────────────────────
 
 def fmt_score(value):
@@ -98,20 +102,24 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "👋 Привет! Я агент для анализа мемкоинов.\n\n"
         "Команды:\n"
         "/check <token> <wallet> — проверить токен и кошелёк\n"
-        "/help — справка\n"
+        "/watch <wallet> — добавить в отслеживание\n"
+        "/unwatch <wallet> — удалить из отслеживания\n"
+        "/list — список отслеживаемых\n"
+        "/help — справка"
     )
 
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "📖 Как использовать:\n\n"
-        "1. Найди адрес токена и адрес кошелька-покупателя.\n"
-        "2. Отправь команду:\n"
-        "   /check <token> <wallet>\n\n"
-        "Пример:\n"
-        "/check DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263 "
-        "DhGTwErJvS6vVjnbxAqzaeGjPHY632LWEHwv5PiXGDoJ\n\n"
-        "Я проверю токен на безопасность, проанализирую кошелёк и скажу вердикт."
+        "🔍 Разовый анализ:\n"
+        "/check <token> <wallet>\n\n"
+        "👁️  Мониторинг кошелька:\n"
+        "/watch <wallet> — добавить кошелёк\n"
+        "/unwatch <wallet> — удалить\n"
+        "/list — показать список\n\n"
+        "Когда отслеживаемый кошелёк что-то купит — "
+        "я пришлю сигнал с анализом."
     )
 
 
@@ -148,7 +156,6 @@ async def cmd_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "REJECT": "🛑",
         }.get(verdict, "❓")
 
-        # ─── Основной вердикт ───
         text = (
             f"{emoji} Вердикт: {verdict}\n"
             f"Confidence: {confidence:.3f}\n"
@@ -164,7 +171,6 @@ async def cmd_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"└ Liquidity:   {fmt_score(breakdown.get('liquidity'))}\n"
         )
 
-        # ─── Smart Money статистика ───
         if sm_stats:
             text += (
                 f"\n🧠 Smart Money:\n"
@@ -175,7 +181,6 @@ async def cmd_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"└ PnL:      {fmt_sol(sm_stats.get('total_pnl_sol'))}\n"
             )
 
-        # ─── Портфель кошелька ───
         portfolio = result.get("portfolio")
         if portfolio:
             sol_bal = portfolio.get("sol_balance", 0)
@@ -209,12 +214,73 @@ async def cmd_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text(f"❌ Ошибка: {e}")
 
 
+async def cmd_watch(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    args = context.args
+    if len(args) != 1:
+        await update.message.reply_text(
+            "❌ Нужно указать адрес кошелька:\n"
+            "/watch <wallet>"
+        )
+        return
+
+    wallet = args[0]
+    if add_wallet(wallet):
+        await update.message.reply_text(
+            f"✅ Кошелёк добавлен в отслеживание:\n{wallet}\n\n"
+            f"Я буду проверять его каждые 5 минут и пришлю сигнал, "
+            f"когда он что-то купит."
+        )
+    else:
+        await update.message.reply_text(
+            f"⚠️ Кошелёк уже отслеживается:\n{wallet}"
+        )
+
+
+async def cmd_unwatch(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    args = context.args
+    if len(args) != 1:
+        await update.message.reply_text(
+            "❌ Нужно указать адрес кошелька:\n"
+            "/unwatch <wallet>"
+        )
+        return
+
+    wallet = args[0]
+    if remove_wallet(wallet):
+        await update.message.reply_text(f"✅ Кошелёк удалён из отслеживания:\n{wallet}")
+    else:
+        await update.message.reply_text(f"⚠️ Кошелёк не найден в списке:\n{wallet}")
+
+
+async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    wallets = list_wallets()
+    if not wallets:
+        await update.message.reply_text(
+            "📭 Список отслеживаемых кошельков пуст.\n\n"
+            "Добавь первый через /watch <wallet>"
+        )
+        return
+
+    text = f"👁️  Отслеживаемые кошельки ({len(wallets)}):\n\n"
+    for i, w in enumerate(wallets, 1):
+        text += f"{i}. {w}\n"
+
+    await update.message.reply_text(text)
+
+
+# ─────────────────────────────────────────────
+# Запуск
+# ─────────────────────────────────────────────
+
 def main():
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("check", cmd_check))
+    app.add_handler(CommandHandler("watch", cmd_watch))
+    app.add_handler(CommandHandler("unwatch", cmd_unwatch))
+    app.add_handler(CommandHandler("list", cmd_list))
 
     print("🤖 Бот запущен. Нажми Ctrl+C для остановки.")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
@@ -223,4 +289,12 @@ def main():
 if __name__ == "__main__":
     from keep_alive import keep_alive
     keep_alive()
+
+    # Запускаем watcher в отдельном потоке
+    import threading
+    from watcher import run_watcher_loop
+
+    watcher_thread = threading.Thread(target=run_watcher_loop, daemon=True)
+    watcher_thread.start()
+
     main()
