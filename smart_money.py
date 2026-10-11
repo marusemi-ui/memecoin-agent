@@ -18,6 +18,10 @@ _token_prices = {}
 _sol_price_usd = None
 
 
+# ─────────────────────────────────────────────
+# Имена и цены токенов
+# ─────────────────────────────────────────────
+
 def get_token_name(mint: str):
     if mint in _token_names:
         return _token_names[mint]
@@ -103,6 +107,111 @@ def get_token_price_usd(mint: str):
         _token_prices[mint] = None
         return None
 
+
+# ─────────────────────────────────────────────
+# БАЛАНС КОШЕЛЬКА
+# ─────────────────────────────────────────────
+
+def get_sol_balance(address: str):
+    """Возвращает SOL-баланс кошелька."""
+    payload = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "getBalance",
+        "params": [address],
+    }
+    try:
+        r = requests.post(RPC_URL, json=payload, timeout=15)
+        r.raise_for_status()
+        data = r.json()
+        lamports = data.get("result", {}).get("value", 0)
+        return lamports / 1_000_000_000
+    except Exception as e:
+        print(f"⚠️  Не удалось получить SOL-баланс: {e}")
+        return 0
+
+
+def get_token_balances(address: str):
+    """Возвращает список SPL-токенов на кошельке."""
+    payload = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "getTokenAccountsByOwner",
+        "params": [
+            address,
+            {"programId": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"},
+            {"encoding": "jsonParsed"},
+        ],
+    }
+    try:
+        r = requests.post(RPC_URL, json=payload, timeout=20)
+        r.raise_for_status()
+        data = r.json()
+
+        accounts = data.get("result", {}).get("value", [])
+        balances = []
+
+        for acc in accounts:
+            info = acc.get("account", {}).get("data", {}).get("parsed", {}).get("info", {})
+            mint = info.get("mint")
+            token_amount = info.get("tokenAmount", {})
+            ui_amount = float(token_amount.get("uiAmount", 0) or 0)
+
+            if ui_amount > 0:
+                balances.append({
+                    "mint": mint,
+                    "amount": ui_amount,
+                    "decimals": token_amount.get("decimals", 0),
+                })
+
+        return balances
+    except Exception as e:
+        print(f"⚠️  Не удалось получить токен-балансы: {e}")
+        return []
+
+
+def summarize_portfolio(address: str):
+    """Считает полную стоимость портфеля в USD."""
+    sol_price = get_sol_price_usd()
+
+    # SOL
+    sol_balance = get_sol_balance(address)
+    sol_value_usd = sol_balance * sol_price if sol_price else 0
+
+    # Токены
+    token_list = get_token_balances(address)
+    tokens_with_value = []
+
+    for t in token_list:
+        mint = t["mint"]
+        amount = t["amount"]
+        price_usd = get_token_price_usd(mint)
+        value_usd = amount * price_usd if price_usd else 0
+
+        tokens_with_value.append({
+            "mint": mint,
+            "amount": amount,
+            "price_usd": price_usd,
+            "value_usd": value_usd,
+        })
+
+    tokens_with_value.sort(key=lambda x: x["value_usd"], reverse=True)
+    total_tokens_value = sum(t["value_usd"] for t in tokens_with_value)
+
+    return {
+        "sol_balance": sol_balance,
+        "sol_value_usd": sol_value_usd,
+        "sol_price_usd": sol_price,
+        "tokens": tokens_with_value,
+        "tokens_count": len(tokens_with_value),
+        "total_tokens_value_usd": total_tokens_value,
+        "total_portfolio_usd": sol_value_usd + total_tokens_value,
+    }
+
+
+# ─────────────────────────────────────────────
+# Helius: транзакции
+# ─────────────────────────────────────────────
 
 def fetch_transactions(address, limit=100, before=None):
     url = BASE_URL.format(address=address)
@@ -310,12 +419,18 @@ def summarize_open_positions(positions):
 def analyze_wallet(address):
     print(f"\n🔍 Анализируем кошелёк: {address}\n")
 
+    # ─── Портфель (SOL + токены) ───
+    print("💰 Считаем баланс кошелька...")
+    portfolio = summarize_portfolio(address)
+
+    # ─── Транзакции ───
     txs = fetch_all_swaps(address, max_pages=5)
     if not txs:
         return {
             "verdict": "UNKNOWN",
             "reason": "Не удалось загрузить транзакции",
             "stats": {},
+            "portfolio": portfolio,
         }
 
     print(f"\n📊 Всего свопов: {len(txs)}")
@@ -414,6 +529,7 @@ def analyze_wallet(address):
             )
         print(f"{'=' * 60}")
 
+    # Вердикт
     if closed_with_sol:
         if win_rate >= 50 and total_pnl_sol > 0 and len(closed_with_sol) >= 3:
             verdict = "PASS"
@@ -444,7 +560,8 @@ def analyze_wallet(address):
             "avg_loss_sol": round(avg_loss, 4) if closed_with_sol else None,
             "total_open_sol": round(total_open_sol, 4) if open_summary else 0,
             "total_unrealized_sol": round(total_unrealized_sol, 4) if open_summary else 0,
-        }
+        },
+        "portfolio": portfolio,
     }
 
 

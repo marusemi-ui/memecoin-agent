@@ -94,6 +94,7 @@ def evaluate_signal(token_mint: str, wallet_address: str) -> dict:
                 "liquidity": None,
             },
             "smart_money_stats": {},
+            "portfolio": None,
         }
 
     print(f"\n🧠 Шаг 2: Smart Money анализ кошелька...")
@@ -141,6 +142,7 @@ def evaluate_signal(token_mint: str, wallet_address: str) -> dict:
         },
         "safety_reason": safety_result["reason"],
         "smart_money_stats": sm_result.get("stats", {}) or {},
+        "portfolio": sm_result.get("portfolio"),
     }
 
 

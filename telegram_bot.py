@@ -28,8 +28,11 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+# ─────────────────────────────────────────────
+# Безопасное форматирование
+# ─────────────────────────────────────────────
+
 def fmt_score(value):
-    """Безопасно форматирует число или возвращает '—'."""
     if value is None:
         return "—"
     try:
@@ -39,7 +42,6 @@ def fmt_score(value):
 
 
 def fmt_percent(value):
-    """Безопасно форматирует процент."""
     if value is None:
         return "—"
     try:
@@ -49,7 +51,6 @@ def fmt_percent(value):
 
 
 def fmt_sol(value):
-    """Безопасно форматирует SOL."""
     if value is None:
         return "—"
     try:
@@ -57,6 +58,40 @@ def fmt_sol(value):
     except (TypeError, ValueError):
         return "—"
 
+
+def fmt_usd(value):
+    if value is None:
+        return "—"
+    try:
+        v = float(value)
+        if v >= 1_000_000:
+            return f"${v/1_000_000:.2f}M"
+        if v >= 1_000:
+            return f"${v/1_000:.2f}K"
+        return f"${v:.2f}"
+    except (TypeError, ValueError):
+        return "—"
+
+
+def fmt_amount(value):
+    if value is None:
+        return "—"
+    try:
+        v = float(value)
+        if v >= 1_000_000_000:
+            return f"{v/1_000_000_000:.2f}B"
+        if v >= 1_000_000:
+            return f"{v/1_000_000:.2f}M"
+        if v >= 1_000:
+            return f"{v/1_000:.2f}K"
+        return f"{v:.4f}"
+    except (TypeError, ValueError):
+        return "—"
+
+
+# ─────────────────────────────────────────────
+# Команды
+# ─────────────────────────────────────────────
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -113,6 +148,7 @@ async def cmd_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "REJECT": "🛑",
         }.get(verdict, "❓")
 
+        # ─── Основной вердикт ───
         text = (
             f"{emoji} Вердикт: {verdict}\n"
             f"Confidence: {confidence:.3f}\n"
@@ -128,14 +164,43 @@ async def cmd_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"└ Liquidity:   {fmt_score(breakdown.get('liquidity'))}\n"
         )
 
-        if sm_stats and sm_stats.get('closed_with_sol') is not None:
+        # ─── Smart Money статистика ───
+        if sm_stats:
             text += (
                 f"\n🧠 Smart Money:\n"
                 f"├ Покупок:  {sm_stats.get('buys', '—')}\n"
                 f"├ Продаж:   {sm_stats.get('sells', '—')}\n"
+                f"├ Закрытых: {sm_stats.get('closed_with_sol', '—')}\n"
                 f"├ Win rate: {fmt_percent(sm_stats.get('win_rate'))}\n"
                 f"└ PnL:      {fmt_sol(sm_stats.get('total_pnl_sol'))}\n"
             )
+
+        # ─── Портфель кошелька ───
+        portfolio = result.get("portfolio")
+        if portfolio:
+            sol_bal = portfolio.get("sol_balance", 0)
+            sol_usd = portfolio.get("sol_value_usd", 0)
+            total_usd = portfolio.get("total_portfolio_usd", 0)
+            tokens = portfolio.get("tokens", [])
+            tokens_count = portfolio.get("tokens_count", 0)
+
+            text += (
+                f"\n💰 Портфель кошелька:\n"
+                f"├ SOL:     {fmt_amount(sol_bal)} SOL ({fmt_usd(sol_usd)})\n"
+                f"├ Токенов: {tokens_count} разных\n"
+                f"└ Итого:   {fmt_usd(total_usd)}\n"
+            )
+
+            if tokens:
+                text += f"\n🪙 Топ-5 по стоимости:\n"
+                for t in tokens[:5]:
+                    name = t.get("mint", "")[:8]
+                    amount = t.get("amount", 0)
+                    value_usd = t.get("value_usd", 0)
+                    text += f"├ {name}... — {fmt_amount(amount)} tok ({fmt_usd(value_usd)})\n"
+
+                if len(tokens) > 5:
+                    text += f"└ ... и ещё {len(tokens) - 5}\n"
 
         await msg.edit_text(text)
 
