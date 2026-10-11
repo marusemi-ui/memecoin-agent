@@ -1,9 +1,9 @@
 """
 Discovery — автопоиск «умных кошельков» из двух источников:
   А) Покупатели топ-токенов
-  Б) Продавцы топ-токенов (у них точно есть закрытые позиции)
+  Б) Продавцы топ-токенов
 
-Все кандидаты объединяются и прогоняются через Smart Money.
+С fallback-списком, если DexScreener не отвечает.
 """
 
 import os
@@ -35,13 +35,31 @@ MAX_VALIDATE = 15
 
 
 # ─────────────────────────────────────────────
-# 1. Топ токенов (DexScreener)
+# Захардкоженный fallback: топ мемкоинов Solana
+# ─────────────────────────────────────────────
+
+FALLBACK_TOKENS = [
+    {"mint": "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263", "symbol": "BONK"},
+    {"mint": "EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm", "symbol": "WIF"},
+    {"mint": "7GCihgDB8fe6KNjn2MYtkzZcRjQy3t9GHdC8uHYmW2hr", "symbol": "POPCAT"},
+    {"mint": "2qEHjDLDLbuBgRYvsxhc5D6uDWAivNFZGan56P1tpump", "symbol": "PNUT"},
+    {"mint": "MEW1gQWJ3nEXg2qgERiKu7FAFj79PHvQVREQUzScPP5", "symbol": "MEW"},
+    {"mint": "ukHH6c7mMyiWCf1b9pnWe25TSpkDDt3H5pQZgZ74J82", "symbol": "BOME"},
+    {"mint": "4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R", "symbol": "RAY"},
+    {"mint": "MangoCzJ36AjZyKwVj3VnYU4GTonjfVEnJmvvWaxLac", "symbol": "MANGO"},
+    {"mint": "hntyVP6YFm1Hg25TN9WGLqM12b8TQmcknKrdu1oxWux", "symbol": "HNT"},
+    {"mint": "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN", "symbol": "JUP"},
+]
+
+
+# ─────────────────────────────────────────────
+# 1. Топ токенов (DexScreener + fallback)
 # ─────────────────────────────────────────────
 
 def get_top_tokens(limit: int = TOP_TOKENS_LIMIT):
     """
-    Возвращает список топовых токенов по объёму за 24ч.
-    Фильтрует SOL и его wrapped-версии.
+    Возвращает список токенов для анализа.
+    Пытается через DexScreener, при неудаче — берёт захардкоженный список.
     """
     url = "https://api.dexscreener.com/latest/dex/search?q=SOL"
     try:
@@ -68,12 +86,9 @@ def get_top_tokens(limit: int = TOP_TOKENS_LIMIT):
         for p in sol_pairs:
             mint = p.get("baseToken", {}).get("address")
             symbol = p.get("baseToken", {}).get("symbol", "?")
-            if not mint:
+            if not mint or mint in seen:
                 continue
-            if mint in seen:
-                continue
-            # Исключаем SOL и его обёртки
-            if mint == SOL_MINT or symbol == "SOL" or symbol == "WSOL":
+            if mint == SOL_MINT or symbol in ("SOL", "WSOL"):
                 continue
             seen.add(mint)
             tokens.append({
@@ -84,14 +99,18 @@ def get_top_tokens(limit: int = TOP_TOKENS_LIMIT):
             if len(tokens) >= limit:
                 break
 
-        logger.info(f"  Отобрано {len(tokens)} токенов:")
-        for t in tokens:
-            logger.info(f"    - {t['symbol']} ({t['mint'][:8]}...) vol=${t['volume_24h']:,.0f}")
+        if tokens:
+            logger.info(f"  Отобрано {len(tokens)} токенов через DexScreener")
+            return tokens
 
-        return tokens
+        logger.warning("  DexScreener вернул пусто, использую fallback")
+
     except Exception as e:
-        logger.error(f"Ошибка топ токенов: {e}")
-        return []
+        logger.error(f"  Ошибка DexScreener: {e}, использую fallback")
+
+    # ─── Fallback: захардкоженный список ───
+    logger.info(f"  Fallback: использую {len(FALLBACK_TOKENS[:limit])} токенов")
+    return [dict(t, volume_24h=0) for t in FALLBACK_TOKENS[:limit]]
 
 
 # ─────────────────────────────────────────────
@@ -100,7 +119,7 @@ def get_top_tokens(limit: int = TOP_TOKENS_LIMIT):
 
 def get_token_traders(token_mint: str, limit: int = 30):
     """
-    Возвращает два списка: тех, кто купил токен (buyers) и тех, кто продал (sellers).
+    Возвращает два списка: покупателей и продавцов токена.
     """
     payload = {
         "jsonrpc": "2.0",
@@ -190,9 +209,7 @@ def get_token_traders(token_mint: str, limit: int = 30):
 # ─────────────────────────────────────────────
 
 def find_candidates(tokens: list):
-    """
-    Собирает кандидатов из покупателей и продавцов.
-    """
+    """Собирает кандидатов из покупателей и продавцов."""
     wallet_data = {}
 
     for i, token in enumerate(tokens):
@@ -219,7 +236,6 @@ def find_candidates(tokens: list):
 
         time.sleep(0.3)
 
-    # Приоритет: both > seller > buyer
     role_priority = {"both": 0, "seller": 1, "buyer": 2}
 
     active = [
@@ -256,22 +272,18 @@ def validate_candidate(wallet: str):
         total_trades = buys + sells
         trades_per_day = total_trades / 30 if total_trades else 0
 
-        # Фильтр ботов
         if trades_per_day > MAX_TRADES_PER_DAY:
             logger.info(f"    ⏭️  {wallet[:8]}... — бот ({trades_per_day:.0f}/день)")
             return None
 
-        # Разрешаем без закрытых, но с открытыми
         if not closed and not open_pos:
             logger.info(f"    ⏭️  {wallet[:8]}... — нет ни закрытых, ни открытых")
             return None
 
-        # Если есть закрытые — проверяем win rate
         if closed and win_rate is not None and win_rate < MIN_WIN_RATE:
             logger.info(f"    ⏭️  {wallet[:8]}... — win rate {win_rate:.0f}% < {MIN_WIN_RATE}%")
             return None
 
-        # Проверяем PnL только если есть закрытые
         if closed and pnl is not None and pnl < 0:
             logger.info(f"    ⏭️  {wallet[:8]}... — PnL {pnl:.4f} SOL < 0")
             return None
@@ -338,7 +350,6 @@ def discover_smart_wallets():
     logger.info("")
     logger.info(f"✅ Найдено {len(valid)} валидных кошельков")
 
-    # Сортировка: сначала с закрытыми и положительным PnL
     def sort_key(x):
         has_closed = 1 if x["closed"] else 0
         has_pnl = 1 if (x["pnl_sol"] is not None and x["pnl_sol"] > 0) else 0
