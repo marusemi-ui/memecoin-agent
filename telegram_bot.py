@@ -1,10 +1,12 @@
 """
 Telegram-бот — обработчики команд.
-Работает через webhook (см. keep_alive.py).
+Работает через polling с защитой от двойного запуска (Upstash lock).
 """
 
 import os
+import time
 import logging
+import requests
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
@@ -14,6 +16,8 @@ from watcher import add_wallet, remove_wallet, list_wallets
 
 load_dotenv()
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+UPSTASH_URL = os.getenv("UPSTASH_REDIS_REST_URL")
+UPSTASH_TOKEN = os.getenv("UPSTASH_REDIS_REST_TOKEN")
 
 if not TELEGRAM_BOT_TOKEN:
     raise ValueError("Нет TELEGRAM_BOT_TOKEN в .env!")
@@ -23,6 +27,52 @@ logging.basicConfig(
     level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
+
+LOCK_KEY = "memecoin_agent:bot_lock"
+LOCK_TTL = 60  # секунд
+
+
+# ─────────────────────────────────────────────
+# Upstash lock — защита от двойного запуска
+# ─────────────────────────────────────────────
+
+def upstash_command(*args):
+    if not UPSTASH_URL or not UPSTASH_TOKEN:
+        return None
+    headers = {
+        "Authorization": f"Bearer {UPSTASH_TOKEN}",
+        "Content-Type": "application/json",
+    }
+    try:
+        r = requests.post(UPSTASH_URL, headers=headers, json=list(args), timeout=10)
+        r.raise_for_status()
+        return r.json().get("result")
+    except Exception as e:
+        logger.error(f"Ошибка Upstash: {e}")
+        return None
+
+
+def acquire_lock():
+    """
+    Пытается получить lock через Upstash SET NX EX.
+    Возвращает True, если lock получен.
+    """
+    result = upstash_command("SET", LOCK_KEY, "1", "NX", "EX", str(LOCK_TTL))
+    if result == "OK":
+        logger.info("🔒 Lock получен")
+        return True
+    logger.warning(f"🔒 Lock не получен (result={result})")
+    return False
+
+
+def refresh_lock():
+    """Обновляет TTL lock."""
+    upstash_command("EXPIRE", LOCK_KEY, str(LOCK_TTL))
+
+
+def release_lock():
+    """Освобождает lock."""
+    upstash_command("DEL", LOCK_KEY)
 
 
 # ─────────────────────────────────────────────
@@ -109,11 +159,11 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🔍 Разовый анализ:\n"
         "/check <token> <wallet>\n\n"
         "👁️  Мониторинг:\n"
-        "/watch <wallet> — добавить\n"
-        "/unwatch <wallet> — удалить\n"
-        "/list — показать список\n\n"
+        "/watch <wallet>\n"
+        "/unwatch <wallet>\n"
+        "/list\n\n"
         "🎯 Автопоиск:\n"
-        "/discover — найти 5 умных кошельков"
+        "/discover"
     )
 
 
@@ -218,8 +268,7 @@ async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_discover(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text(
-        "🔍 Начинаю автопоиск умных кошельков...\n\n"
-        "Это займёт 1-2 минуты."
+        "🔍 Начинаю автопоиск умных кошельков...\n\nЭто займёт 1-2 минуты."
     )
 
     try:
@@ -239,14 +288,12 @@ async def cmd_discover(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if not valid:
             await msg.edit_text(
-                f"😔 Не найдено подходящих кошельков.\n\n"
-                f"Проверено токенов: {tokens_checked}\n"
-                f"Кандидатов: {candidates_found}"
+                f"😔 Не найдено.\n\nПроверено токенов: {tokens_checked}\nКандидатов: {candidates_found}"
             )
             return
 
         text = (
-            f"🎯 Найдено {len(valid)} умных кошельков:\n"
+            f"🎯 Найдено {len(valid)} кошельков:\n"
             f"(проверено {tokens_checked} токенов, {candidates_found} кандидатов)\n\n"
         )
 
@@ -255,13 +302,11 @@ async def cmd_discover(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pnl = f"{w['pnl_sol']:+.4f}" if w['pnl_sol'] is not None else "—"
             text += (
                 f"{i}. {w['wallet']}\n"
-                f"   Win rate: {win}\n"
-                f"   PnL: {pnl} SOL\n"
-                f"   Роль: {w.get('role', '?')}\n"
-                f"   Закрытых: {w['closed']}, открытых: {w.get('open_positions', 0)}\n\n"
+                f"   Win: {win}, PnL: {pnl} SOL\n"
+                f"   Роль: {w.get('role', '?')}\n\n"
             )
 
-        text += "💡 Добавить в мониторинг: /watch <wallet>"
+        text += "💡 /watch <wallet>"
         await msg.edit_text(text)
 
     except Exception as e:
@@ -270,15 +315,48 @@ async def cmd_discover(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ─────────────────────────────────────────────
-# Создаём Application (без run_polling)
+# Запуск
 # ─────────────────────────────────────────────
 
-app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+def main():
+    # Пробуем получить lock
+    if not acquire_lock():
+        logger.warning("Другой процесс уже работает. Выход.")
+        return
 
-app.add_handler(CommandHandler("start", cmd_start))
-app.add_handler(CommandHandler("help", cmd_help))
-app.add_handler(CommandHandler("check", cmd_check))
-app.add_handler(CommandHandler("watch", cmd_watch))
-app.add_handler(CommandHandler("unwatch", cmd_unwatch))
-app.add_handler(CommandHandler("list", cmd_list))
-app.add_handler(CommandHandler("discover", cmd_discover))
+    app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+
+    app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("help", cmd_help))
+    app.add_handler(CommandHandler("check", cmd_check))
+    app.add_handler(CommandHandler("watch", cmd_watch))
+    app.add_handler(CommandHandler("unwatch", cmd_unwatch))
+    app.add_handler(CommandHandler("list", cmd_list))
+    app.add_handler(CommandHandler("discover", cmd_discover))
+
+    print("🤖 Бот запущен.")
+
+    # Обновляем lock каждые 30 секунд
+    import threading
+
+    def refresh_loop():
+        while True:
+            time.sleep(30)
+            refresh_lock()
+
+    threading.Thread(target=refresh_loop, daemon=True).start()
+
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
+
+
+if __name__ == "__main__":
+    from keep_alive import keep_alive
+    keep_alive()
+
+    import threading
+    from watcher import run_watcher_loop
+
+    watcher_thread = threading.Thread(target=run_watcher_loop, daemon=True)
+    watcher_thread.start()
+
+    main()
