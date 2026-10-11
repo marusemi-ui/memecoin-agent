@@ -32,7 +32,7 @@ def health():
     return "OK", 200
 
 
-@app.route(f"/webhook/{os.getenv('TELEGRAM_BOT_TOKEN', '')}", methods=["POST"])
+@app.route("/webhook", methods=["POST"])
 def webhook():
     """Принимает обновления от Telegram."""
     try:
@@ -40,10 +40,8 @@ def webhook():
         if not data:
             return "no data", 400
 
-        # Обрабатываем через Application из telegram_bot
         update = Update.de_json(data, telegram_bot.app.bot)
 
-        # Запускаем обработку асинхронно
         import asyncio
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
@@ -66,7 +64,7 @@ def set_webhook():
         if not render_url:
             return "RENDER_EXTERNAL_URL не задан", 500
 
-        webhook_url = f"{render_url}/webhook/{os.getenv('TELEGRAM_BOT_TOKEN', '')}"
+        webhook_url = f"{render_url}/webhook"
         result = bot.set_webhook(url=webhook_url)
 
         if result:
