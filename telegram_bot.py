@@ -1,6 +1,5 @@
 """
 Telegram-бот — обработчики команд.
-Простой polling без Upstash lock.
 """
 
 import os
@@ -25,70 +24,40 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-# ─────────────────────────────────────────────
-# Форматирование
-# ─────────────────────────────────────────────
+def fmt_score(v):
+    if v is None: return "—"
+    try: return f"{float(v):.2f}"
+    except (TypeError, ValueError): return "—"
 
-def fmt_score(value):
-    if value is None:
-        return "—"
+def fmt_percent(v):
+    if v is None: return "—"
+    try: return f"{float(v):.1f}%"
+    except (TypeError, ValueError): return "—"
+
+def fmt_sol(v):
+    if v is None: return "—"
+    try: return f"{float(v):+.4f} SOL"
+    except (TypeError, ValueError): return "—"
+
+def fmt_usd(v):
+    if v is None: return "—"
     try:
-        return f"{float(value):.2f}"
-    except (TypeError, ValueError):
-        return "—"
-
-
-def fmt_percent(value):
-    if value is None:
-        return "—"
-    try:
-        return f"{float(value):.1f}%"
-    except (TypeError, ValueError):
-        return "—"
-
-
-def fmt_sol(value):
-    if value is None:
-        return "—"
-    try:
-        return f"{float(value):+.4f} SOL"
-    except (TypeError, ValueError):
-        return "—"
-
-
-def fmt_usd(value):
-    if value is None:
-        return "—"
-    try:
-        v = float(value)
-        if v >= 1_000_000:
-            return f"${v/1_000_000:.2f}M"
-        if v >= 1_000:
-            return f"${v/1_000:.2f}K"
+        v = float(v)
+        if v >= 1_000_000: return f"${v/1_000_000:.2f}M"
+        if v >= 1_000: return f"${v/1_000:.2f}K"
         return f"${v:.2f}"
-    except (TypeError, ValueError):
-        return "—"
+    except (TypeError, ValueError): return "—"
 
-
-def fmt_amount(value):
-    if value is None:
-        return "—"
+def fmt_amount(v):
+    if v is None: return "—"
     try:
-        v = float(value)
-        if v >= 1_000_000_000:
-            return f"{v/1_000_000_000:.2f}B"
-        if v >= 1_000_000:
-            return f"{v/1_000_000:.2f}M"
-        if v >= 1_000:
-            return f"{v/1_000:.2f}K"
+        v = float(v)
+        if v >= 1_000_000_000: return f"{v/1_000_000_000:.2f}B"
+        if v >= 1_000_000: return f"{v/1_000_000:.2f}M"
+        if v >= 1_000: return f"{v/1_000:.2f}K"
         return f"{v:.4f}"
-    except (TypeError, ValueError):
-        return "—"
+    except (TypeError, ValueError): return "—"
 
-
-# ─────────────────────────────────────────────
-# Команды
-# ─────────────────────────────────────────────
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -106,11 +75,9 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "📖 Как использовать:\n\n"
-        "🔍 /check <token> <wallet> — разовый анализ\n\n"
-        "👁️ /watch <wallet> — добавить в мониторинг\n"
-        "/unwatch <wallet> — удалить\n"
-        "/list — список\n\n"
-        "🎯 /discover — автопоиск умных кошельков"
+        "🔍 /check <token> <wallet>\n\n"
+        "👁️ /watch <wallet>\n/unwatch <wallet>\n/list\n\n"
+        "🎯 /discover — автопоиск (win rate ≥ 50%)"
     )
 
 
@@ -180,10 +147,9 @@ async def cmd_watch(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(args) != 1:
         await update.message.reply_text("❌ /watch <wallet>")
         return
-
     wallet = args[0]
     if add_wallet(wallet):
-        await update.message.reply_text(f"✅ Кошелёк добавлен:\n{wallet}")
+        await update.message.reply_text(f"✅ Добавлен:\n{wallet}")
     else:
         await update.message.reply_text(f"⚠️ Уже отслеживается:\n{wallet}")
 
@@ -193,7 +159,6 @@ async def cmd_unwatch(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(args) != 1:
         await update.message.reply_text("❌ /unwatch <wallet>")
         return
-
     wallet = args[0]
     if remove_wallet(wallet):
         await update.message.reply_text(f"✅ Удалён:\n{wallet}")
@@ -206,7 +171,6 @@ async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not wallets:
         await update.message.reply_text("📭 Список пуст.\nДобавь: /watch <wallet>")
         return
-
     text = f"👁️  Отслеживаемые ({len(wallets)}):\n\n"
     for i, w in enumerate(wallets, 1):
         text += f"{i}. {w}\n"
@@ -215,7 +179,10 @@ async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_discover(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text(
-        "🔍 Начинаю автопоиск умных кошельков...\n\nЭто займёт 1-2 минуты."
+        "🔍 Начинаю автопоиск умных кошельков...\n\n"
+        "Ищу трейдеров в свежих pump.fun токенах.\n"
+        "Фильтр: win rate ≥ 50%.\n\n"
+        "Это займёт 1-2 минуты."
     )
 
     try:
@@ -235,12 +202,15 @@ async def cmd_discover(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if not valid:
             await msg.edit_text(
-                f"😔 Не найдено.\n\nПроверено токенов: {tokens_checked}\nКандидатов: {candidates_found}"
+                f"😔 Не найдено (win rate ≥ 50%).\n\n"
+                f"Проверено токенов: {tokens_checked}\n"
+                f"Кандидатов: {candidates_found}\n\n"
+                f"💡 Win rate 50% — строгий фильтр. Попробуй позже."
             )
             return
 
         text = (
-            f"🎯 Найдено {len(valid)} кошельков:\n"
+            f"🎯 Найдено {len(valid)} кошельков (win rate ≥ 50%):\n"
             f"(проверено {tokens_checked} токенов, {candidates_found} кандидатов)\n\n"
         )
 
@@ -250,10 +220,11 @@ async def cmd_discover(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text += (
                 f"{i}. {w['wallet']}\n"
                 f"   Win: {win}, PnL: {pnl} SOL\n"
-                f"   Роль: {w.get('role', '?')}\n\n"
+                f"   Роль: {w.get('role', '?')}\n"
+                f"   Сделок/день: {w.get('trades_per_day', '—')}\n\n"
             )
 
-        text += "💡 /watch <wallet>"
+        text += "💡 /watch <wallet> — добавить в мониторинг"
         await msg.edit_text(text)
 
     except Exception as e:
@@ -261,13 +232,8 @@ async def cmd_discover(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text(f"❌ Ошибка: {e}")
 
 
-# ─────────────────────────────────────────────
-# Запуск
-# ─────────────────────────────────────────────
-
 def main():
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("check", cmd_check))
@@ -275,7 +241,6 @@ def main():
     app.add_handler(CommandHandler("unwatch", cmd_unwatch))
     app.add_handler(CommandHandler("list", cmd_list))
     app.add_handler(CommandHandler("discover", cmd_discover))
-
     print("🤖 Бот запущен.")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
@@ -283,11 +248,8 @@ def main():
 if __name__ == "__main__":
     from keep_alive import keep_alive
     keep_alive()
-
     import threading
     from watcher import run_watcher_loop
-
     watcher_thread = threading.Thread(target=run_watcher_loop, daemon=True)
     watcher_thread.start()
-
     main()

@@ -1,9 +1,5 @@
 """
-Discovery — автопоиск «умных кошельков» из двух источников:
-  А) Покупатели топ-токенов
-  Б) Продавцы топ-токенов
-
-С fallback-списком, если DexScreener не отвечает.
+Discovery — автопоиск «умных кошельков» через свежие pump.fun токены.
 """
 
 import os
@@ -25,102 +21,98 @@ logger = logging.getLogger(__name__)
 RPC_URL = f"https://mainnet.helius-rpc.com/?api-key={HELIUS_API_KEY}"
 SOL_MINT = "So11111111111111111111111111111111111111112"
 
-# Настройки
+# ─────────────────────────────────────────────
+# НАСТРОЙКИ
+# ─────────────────────────────────────────────
+
 TOP_TOKENS_LIMIT = 10
 MIN_TOKEN_APPEARANCE = 2
-MIN_WIN_RATE = 30.0
-MAX_TRADES_PER_DAY = 300
+MIN_WIN_RATE = 50.0
+MAX_TRADES_PER_DAY = 1000
 MAX_CANDIDATES = 30
-MAX_VALIDATE = 15
+MAX_VALIDATE = 20
 
 
 # ─────────────────────────────────────────────
-# Захардкоженный fallback: топ мемкоинов Solana
+# Fallback: актуальные мемкоины
 # ─────────────────────────────────────────────
 
 FALLBACK_TOKENS = [
-    {"mint": "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263", "symbol": "BONK"},
-    {"mint": "EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm", "symbol": "WIF"},
-    {"mint": "7GCihgDB8fe6KNjn2MYtkzZcRjQy3t9GHdC8uHYmW2hr", "symbol": "POPCAT"},
     {"mint": "2qEHjDLDLbuBgRYvsxhc5D6uDWAivNFZGan56P1tpump", "symbol": "PNUT"},
+    {"mint": "CzLSujWBLFsSjncfkh59rUFqvafWcYt5N2cqAy8Apump", "symbol": "WEN"},
+    {"mint": "9BB6NFEcjBCtnNLFko2FqVQBq8HHM13kCyYcdQbgpump", "symbol": "FARTCOIN"},
+    {"mint": "A8C3xuqscfmyLrte3VmTqrAq8kgMASius9AFNANwpump", "symbol": "FWOG"},
     {"mint": "MEW1gQWJ3nEXg2qgERiKu7FAFj79PHvQVREQUzScPP5", "symbol": "MEW"},
     {"mint": "ukHH6c7mMyiWCf1b9pnWe25TSpkDDt3H5pQZgZ74J82", "symbol": "BOME"},
-    {"mint": "4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R", "symbol": "RAY"},
-    {"mint": "MangoCzJ36AjZyKwVj3VnYU4GTonjfVEnJmvvWaxLac", "symbol": "MANGO"},
-    {"mint": "hntyVP6YFm1Hg25TN9WGLqM12b8TQmcknKrdu1oxWux", "symbol": "HNT"},
-    {"mint": "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN", "symbol": "JUP"},
+    {"mint": "GJAFwWjJ3vnTsrQVabjBVK2TYB1YtRCQXRDfDgUnpump", "symbol": "MICHI"},
+    {"mint": "ED5nyyWEzpPPiWimP8vYm7sD7TD3LAt3Q3gRTWHzPJBY", "symbol": "MOODENG"},
+    {"mint": "7atgF8KQo4wJrD5ATGX7t1V2zVvykPJbFfNeVf1icFv1", "symbol": "MOTHER"},
+    {"mint": "HgcxVs6kJhPAaGqnPNGaa7zYgNT49hJrLufiqcNMuYZT", "symbol": "SPCX"},
 ]
 
 
 # ─────────────────────────────────────────────
-# 1. Топ токенов (DexScreener + fallback)
+# 1. Свежие токены pump.fun
 # ─────────────────────────────────────────────
 
-def get_top_tokens(limit: int = TOP_TOKENS_LIMIT):
-    """
-    Возвращает список токенов для анализа.
-    Пытается через DexScreener, при неудаче — берёт захардкоженный список.
-    """
-    url = "https://api.dexscreener.com/latest/dex/search?q=SOL"
+def get_fresh_pumpfun_tokens(limit: int = TOP_TOKENS_LIMIT):
+    url = "https://frontend-api-v3.pump.fun/coins"
+    params = {
+        "offset": 0,
+        "limit": 100,
+        "sort": "created_timestamp",
+        "order": "DESC",
+    }
     try:
-        r = requests.get(url, timeout=15)
+        r = requests.get(url, params=params, timeout=15)
         r.raise_for_status()
         data = r.json()
-        pairs = data.get("pairs", [])
-        logger.info(f"  DexScreener вернул {len(pairs)} пар")
 
-        sol_pairs = [
-            p for p in pairs
-            if p.get("chainId") == "solana"
-            and float(p.get("liquidity", {}).get("usd", 0) or 0) > 50_000
-        ]
-        logger.info(f"  Из них Solana с ликвидностью >50k: {len(sol_pairs)}")
+        if not isinstance(data, list):
+            logger.warning(f"pump.fun вернул не список: {type(data)}")
+            return []
 
-        sol_pairs.sort(
-            key=lambda p: float(p.get("volume", {}).get("h24", 0) or 0),
-            reverse=True,
-        )
+        logger.info(f"  pump.fun вернул {len(data)} токенов")
 
-        seen = set()
         tokens = []
-        for p in sol_pairs:
-            mint = p.get("baseToken", {}).get("address")
-            symbol = p.get("baseToken", {}).get("symbol", "?")
-            if not mint or mint in seen:
+        for coin in data:
+            mint = coin.get("mint")
+            symbol = coin.get("symbol", "?")
+            market_cap = float(coin.get("usd_market_cap", 0) or 0)
+
+            if not mint or market_cap < 20_000:
                 continue
-            if mint == SOL_MINT or symbol in ("SOL", "WSOL"):
-                continue
-            seen.add(mint)
+
             tokens.append({
                 "mint": mint,
                 "symbol": symbol,
-                "volume_24h": float(p.get("volume", {}).get("h24", 0) or 0),
+                "volume_24h": market_cap,
+                "market_cap": market_cap,
             })
+
             if len(tokens) >= limit:
                 break
 
         if tokens:
-            logger.info(f"  Отобрано {len(tokens)} токенов через DexScreener")
+            logger.info(f"  Отобрано {len(tokens)} свежих токенов (MC > $20k)")
+            for t in tokens:
+                logger.info(f"    - {t['symbol']}: MC ${t['market_cap']:,.0f}")
             return tokens
 
-        logger.warning("  DexScreener вернул пусто, использую fallback")
+        logger.warning("  Все токены pump.fun < $20k, использую fallback")
 
     except Exception as e:
-        logger.error(f"  Ошибка DexScreener: {e}, использую fallback")
+        logger.error(f"  Ошибка pump.fun API: {e}, использую fallback")
 
-    # ─── Fallback: захардкоженный список ───
     logger.info(f"  Fallback: использую {len(FALLBACK_TOKENS[:limit])} токенов")
-    return [dict(t, volume_24h=0) for t in FALLBACK_TOKENS[:limit]]
+    return [dict(t, volume_24h=0, market_cap=0) for t in FALLBACK_TOKENS[:limit]]
 
 
 # ─────────────────────────────────────────────
-# 2. Покупатели и продавцы токена
+# 2. Покупатели и продавцы
 # ─────────────────────────────────────────────
 
 def get_token_traders(token_mint: str, limit: int = 30):
-    """
-    Возвращает два списка: покупателей и продавцов токена.
-    """
     payload = {
         "jsonrpc": "2.0",
         "id": 1,
@@ -167,8 +159,8 @@ def get_token_traders(token_mint: str, limit: int = 30):
                 post_map = {b.get("accountIndex"): float(b.get("uiTokenAmount", {}).get("uiAmount") or 0) for b in post_balances}
 
                 account_keys = result.get("transaction", {}).get("message", {}).get("accountKeys", [])
-
                 all_indices = set(list(pre_map.keys()) + list(post_map.keys()))
+
                 for idx_str in all_indices:
                     try:
                         idx = int(idx_str)
@@ -205,11 +197,10 @@ def get_token_traders(token_mint: str, limit: int = 30):
 
 
 # ─────────────────────────────────────────────
-# 3. Поиск активных кандидатов
+# 3. Активные кандидаты
 # ─────────────────────────────────────────────
 
 def find_candidates(tokens: list):
-    """Собирает кандидатов из покупателей и продавцов."""
     wallet_data = {}
 
     for i, token in enumerate(tokens):
@@ -254,7 +245,7 @@ def find_candidates(tokens: list):
 
 
 # ─────────────────────────────────────────────
-# 4. Валидация кандидата через Smart Money
+# 4. Валидация
 # ─────────────────────────────────────────────
 
 def validate_candidate(wallet: str):
@@ -270,14 +261,14 @@ def validate_candidate(wallet: str):
         sells = stats.get("sells", 0)
 
         total_trades = buys + sells
-        trades_per_day = total_trades / 30 if total_trades else 0
+        trades_per_day = total_trades / 3 if total_trades else 0
 
         if trades_per_day > MAX_TRADES_PER_DAY:
             logger.info(f"    ⏭️  {wallet[:8]}... — бот ({trades_per_day:.0f}/день)")
             return None
 
-        if not closed and not open_pos:
-            logger.info(f"    ⏭️  {wallet[:8]}... — нет ни закрытых, ни открытых")
+        if not closed and not open_pos and buys == 0 and sells == 0:
+            logger.info(f"    ⏭️  {wallet[:8]}... — нет активности")
             return None
 
         if closed and win_rate is not None and win_rate < MIN_WIN_RATE:
@@ -313,10 +304,10 @@ def discover_smart_wallets():
     logger.info("🔍 НАЧИНАЮ АВТОПОИСК УМНЫХ КОШЕЛЬКОВ")
     logger.info("=" * 60)
 
-    logger.info("📊 Шаг 1: Получаю топ токенов...")
-    tokens = get_top_tokens(limit=TOP_TOKENS_LIMIT)
+    logger.info("📊 Шаг 1: Получаю свежие pump.fun токены...")
+    tokens = get_fresh_pumpfun_tokens(limit=TOP_TOKENS_LIMIT)
     if not tokens:
-        return {"error": "Не удалось получить топ токенов"}
+        return {"error": "Не удалось получить токены"}
 
     logger.info("")
     logger.info("👥 Шаг 2: Ищу трейдеров...")
@@ -331,7 +322,7 @@ def discover_smart_wallets():
         logger.info(f"    {c['wallet'][:8]}... — role={c['role']}, токенов={c['count']}")
 
     logger.info("")
-    logger.info("🧠 Шаг 3: Проверяю через Smart Money...")
+    logger.info("🧠 Шаг 3: Проверяю через Smart Money (win rate ≥ 50%)...")
     valid = []
     for i, cand in enumerate(candidates[:MAX_VALIDATE]):
         wallet = cand["wallet"]

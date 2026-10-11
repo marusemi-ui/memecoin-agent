@@ -19,13 +19,12 @@ _sol_price_usd = None
 
 
 # ─────────────────────────────────────────────
-# Имена и цены токенов
+# Имена и цены
 # ─────────────────────────────────────────────
 
 def get_token_name(mint: str):
     if mint in _token_names:
         return _token_names[mint]
-
     if mint == SOL_MINT:
         _token_names[mint] = "SOL"
         return "SOL"
@@ -40,7 +39,6 @@ def get_token_name(mint: str):
         r = requests.post(RPC_URL, json=payload, timeout=10)
         r.raise_for_status()
         data = r.json()
-
         result = data.get("result")
         if not result:
             _token_names[mint] = mint[:6]
@@ -50,7 +48,6 @@ def get_token_name(mint: str):
         metadata = content.get("metadata", {})
         name = metadata.get("name") or metadata.get("symbol") or mint[:6]
         symbol = metadata.get("symbol", "")
-
         display = f"{name} ({symbol})" if symbol and symbol != name else name
         _token_names[mint] = display[:30]
         return _token_names[mint]
@@ -63,7 +60,6 @@ def get_sol_price_usd():
     global _sol_price_usd
     if _sol_price_usd is not None:
         return _sol_price_usd
-
     try:
         r = requests.get(
             f"https://api.dexscreener.com/latest/dex/tokens/{SOL_MINT}",
@@ -78,7 +74,6 @@ def get_sol_price_usd():
             return _sol_price_usd
     except Exception:
         pass
-
     _sol_price_usd = 0
     return 0
 
@@ -86,7 +81,6 @@ def get_sol_price_usd():
 def get_token_price_usd(mint: str):
     if mint in _token_prices:
         return _token_prices[mint]
-
     try:
         r = requests.get(
             f"https://api.dexscreener.com/latest/dex/tokens/{mint}",
@@ -98,7 +92,6 @@ def get_token_price_usd(mint: str):
         if not pairs:
             _token_prices[mint] = None
             return None
-
         best = max(pairs, key=lambda p: float(p.get("liquidity", {}).get("usd", 0) or 0))
         price = float(best.get("priceUsd", 0) or 0)
         _token_prices[mint] = price if price > 0 else None
@@ -109,11 +102,10 @@ def get_token_price_usd(mint: str):
 
 
 # ─────────────────────────────────────────────
-# БАЛАНС КОШЕЛЬКА
+# Балансы
 # ─────────────────────────────────────────────
 
 def get_sol_balance(address: str):
-    """Возвращает SOL-баланс кошелька."""
     payload = {
         "jsonrpc": "2.0",
         "id": 1,
@@ -132,7 +124,6 @@ def get_sol_balance(address: str):
 
 
 def get_token_balances(address: str):
-    """Возвращает список SPL-токенов на кошельке."""
     payload = {
         "jsonrpc": "2.0",
         "id": 1,
@@ -147,23 +138,19 @@ def get_token_balances(address: str):
         r = requests.post(RPC_URL, json=payload, timeout=20)
         r.raise_for_status()
         data = r.json()
-
         accounts = data.get("result", {}).get("value", [])
         balances = []
-
         for acc in accounts:
             info = acc.get("account", {}).get("data", {}).get("parsed", {}).get("info", {})
             mint = info.get("mint")
             token_amount = info.get("tokenAmount", {})
             ui_amount = float(token_amount.get("uiAmount", 0) or 0)
-
             if ui_amount > 0:
                 balances.append({
                     "mint": mint,
                     "amount": ui_amount,
                     "decimals": token_amount.get("decimals", 0),
                 })
-
         return balances
     except Exception as e:
         print(f"⚠️  Не удалось получить токен-балансы: {e}")
@@ -171,25 +158,21 @@ def get_token_balances(address: str):
 
 
 def summarize_portfolio(address: str):
-    """Считает полную стоимость портфеля в USD."""
     sol_price = get_sol_price_usd()
-
-    # SOL
     sol_balance = get_sol_balance(address)
     sol_value_usd = sol_balance * sol_price if sol_price else 0
 
-    # Токены
     token_list = get_token_balances(address)
     tokens_with_value = []
-
     for t in token_list:
         mint = t["mint"]
         amount = t["amount"]
         price_usd = get_token_price_usd(mint)
         value_usd = amount * price_usd if price_usd else 0
-
+        name = get_token_name(mint)
         tokens_with_value.append({
             "mint": mint,
+            "name": name,
             "amount": amount,
             "price_usd": price_usd,
             "value_usd": value_usd,
@@ -210,7 +193,7 @@ def summarize_portfolio(address: str):
 
 
 # ─────────────────────────────────────────────
-# Helius: транзакции
+# Транзакции
 # ─────────────────────────────────────────────
 
 def fetch_transactions(address, limit=100, before=None):
@@ -222,7 +205,6 @@ def fetch_transactions(address, limit=100, before=None):
     }
     if before:
         params["before"] = before
-
     try:
         response = requests.get(url, params=params, timeout=30)
         response.raise_for_status()
@@ -235,28 +217,22 @@ def fetch_transactions(address, limit=100, before=None):
 def fetch_all_swaps(address, max_pages=5):
     all_txs = []
     before = None
-
     for page in range(max_pages):
         txs = fetch_transactions(address, limit=100, before=before)
         if not txs:
             break
-
         all_txs.extend(txs)
         print(f"📥 Страница {page + 1}: +{len(txs)} транзакций (всего {len(all_txs)})")
-
         if len(txs) < 100:
             break
-
         before = txs[-1]["signature"]
         time.sleep(0.5)
-
     return all_txs
 
 
 def parse_swap(tx, wallet_address):
     if tx.get("type") != "SWAP":
         return None
-
     transfers = tx.get("tokenTransfers", [])
     if not transfers:
         return None
@@ -292,7 +268,6 @@ def parse_swap(tx, wallet_address):
             "sol_amount": sol_sent,
             "timestamp": tx.get("timestamp"),
         }
-
     if sent and not received:
         token = sent[0]
         return {
@@ -302,13 +277,11 @@ def parse_swap(tx, wallet_address):
             "sol_amount": sol_received,
             "timestamp": tx.get("timestamp"),
         }
-
     return None
 
 
 def analyze_pnl(swaps, wallet_address):
     sorted_swaps = sorted(swaps, key=lambda t: t.get("timestamp", 0))
-
     positions = {}
     closed = []
     buys_count = 0
@@ -318,7 +291,6 @@ def analyze_pnl(swaps, wallet_address):
         parsed = parse_swap(tx, wallet_address)
         if not parsed:
             continue
-
         token = parsed["token"]
         amount = parsed["token_amount"]
         sol_amount = parsed["sol_amount"]
@@ -330,7 +302,6 @@ def analyze_pnl(swaps, wallet_address):
                 "sol_spent": sol_amount,
                 "timestamp": parsed["timestamp"],
             })
-
         elif parsed["action"] == "SELL":
             sells_count += 1
             if token not in positions or not positions[token]:
@@ -359,7 +330,6 @@ def analyze_pnl(swaps, wallet_address):
                 sol_received_matched = sol_amount * (tokens_matched / amount) if amount else 0
                 pnl_sol = sol_received_matched - sol_spent_matched
                 pnl_pct = (pnl_sol / sol_spent_matched * 100) if sol_spent_matched > 0 else 0
-
                 closed.append({
                     "token": token,
                     "tokens_matched": tokens_matched,
@@ -369,18 +339,15 @@ def analyze_pnl(swaps, wallet_address):
                     "pnl_percent": pnl_pct,
                     "timestamp": parsed["timestamp"],
                 })
-
     return closed, positions, buys_count, sells_count
 
 
 def summarize_open_positions(positions):
     sol_price = get_sol_price_usd()
     summary = []
-
     for token, buys in positions.items():
         if not buys:
             continue
-
         total_tokens = sum(b["amount"] for b in buys)
         total_sol = sum(b["sol_spent"] for b in buys)
         if total_tokens <= 0:
@@ -411,7 +378,6 @@ def summarize_open_positions(positions):
             "unrealized_pnl_pct": unrealized_pnl_pct,
             "current_value_usd": current_value_usd,
         })
-
     summary.sort(key=lambda x: x["sol_invested"], reverse=True)
     return summary
 
@@ -419,11 +385,9 @@ def summarize_open_positions(positions):
 def analyze_wallet(address):
     print(f"\n🔍 Анализируем кошелёк: {address}\n")
 
-    # ─── Портфель (SOL + токены) ───
     print("💰 Считаем баланс кошелька...")
     portfolio = summarize_portfolio(address)
 
-    # ─── Транзакции ───
     txs = fetch_all_swaps(address, max_pages=5)
     if not txs:
         return {
@@ -436,10 +400,11 @@ def analyze_wallet(address):
     print(f"\n📊 Всего свопов: {len(txs)}")
 
     now = time.time()
-    txs_30d = [t for t in txs if t.get("timestamp", 0) > now - 30 * 86400]
-    print(f"📅 За 30 дней: {len(txs_30d)}")
+    # ОКНО 3 ДНЯ (вместо 30)
+    txs_recent = [t for t in txs if t.get("timestamp", 0) > now - 3 * 86400]
+    print(f"📅 За 3 дня: {len(txs_recent)}")
 
-    closed, open_positions, buys, sells = analyze_pnl(txs_30d, address)
+    closed, open_positions, buys, sells = analyze_pnl(txs_recent, address)
 
     print(f"\n🛒 Покупок: {buys}")
     print(f"💸 Продаж: {sells}")
@@ -511,7 +476,6 @@ def analyze_wallet(address):
         for i, pos in enumerate(open_summary[:10]):
             name = get_token_name(pos["token"])
             dt = time.strftime("%Y-%m-%d", time.localtime(pos["first_buy_ts"]))
-
             try:
                 if pos["unrealized_pnl_sol"] is not None and pos["unrealized_pnl_pct"] is not None:
                     pnl_str = f"{pos['unrealized_pnl_sol']:+.4f} SOL ({pos['unrealized_pnl_pct']:+.1f}%)"
@@ -519,7 +483,6 @@ def analyze_wallet(address):
                     pnl_str = "нет цены"
             except (TypeError, ValueError):
                 pnl_str = "нет цены"
-
             print(
                 f"#{i+1:2} {name:<26} "
                 f"| {pos['tokens']:>15,.0f} tok "
@@ -529,7 +492,6 @@ def analyze_wallet(address):
             )
         print(f"{'=' * 60}")
 
-    # Вердикт
     if closed_with_sol:
         if win_rate >= 50 and total_pnl_sol > 0 and len(closed_with_sol) >= 3:
             verdict = "PASS"
@@ -548,7 +510,7 @@ def analyze_wallet(address):
         "verdict": verdict,
         "reason": reason,
         "stats": {
-            "swaps_30d": len(txs_30d),
+            "swaps_recent": len(txs_recent),
             "buys": buys,
             "sells": sells,
             "closed_positions": len(closed),
