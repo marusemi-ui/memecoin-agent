@@ -1,13 +1,6 @@
 """
-Telegram-бот для агента.
-Команды:
-  /start     — приветствие
-  /help      — справка
-  /check     — проверить токен и кошелёк
-  /watch     — добавить в отслеживание
-  /unwatch   — удалить из отслеживания
-  /list      — показать отслеживаемые
-  /discover  — найти умные кошельки автоматически
+Telegram-бот — обработчики команд.
+Работает через webhook (см. keep_alive.py).
 """
 
 import os
@@ -21,7 +14,6 @@ from watcher import add_wallet, remove_wallet, list_wallets
 
 load_dotenv()
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 if not TELEGRAM_BOT_TOKEN:
     raise ValueError("Нет TELEGRAM_BOT_TOKEN в .env!")
@@ -104,7 +96,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Команды:\n"
         "/check <token> <wallet> — проверить токен и кошелёк\n"
         "/watch <wallet> — добавить в отслеживание\n"
-        "/unwatch <wallet> — удалить из отслеживания\n"
+        "/unwatch <wallet> — удалить\n"
         "/list — список отслеживаемых\n"
         "/discover — найти умные кошельки\n"
         "/help — справка"
@@ -121,8 +113,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/unwatch <wallet> — удалить\n"
         "/list — показать список\n\n"
         "🎯 Автопоиск:\n"
-        "/discover — найти 5 умных кошельков\n"
-        "(может занять 1-2 минуты)"
+        "/discover — найти 5 умных кошельков"
     )
 
 
@@ -226,19 +217,15 @@ async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_discover(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Автопоиск умных кошельков."""
     msg = await update.message.reply_text(
         "🔍 Начинаю автопоиск умных кошельков...\n\n"
-        "Это займёт 1-2 минуты.\n"
-        "Я проверяю топ-токены, ищу активных покупателей "
-        "и прогоняю каждого через Smart Money."
+        "Это займёт 1-2 минуты."
     )
 
     try:
         import asyncio
         from discovery import discover_smart_wallets
 
-        # Запускаем в отдельном потоке, чтобы не блокировать бота
         loop = asyncio.get_event_loop()
         result = await loop.run_in_executor(None, discover_smart_wallets)
 
@@ -254,8 +241,7 @@ async def cmd_discover(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.edit_text(
                 f"😔 Не найдено подходящих кошельков.\n\n"
                 f"Проверено токенов: {tokens_checked}\n"
-                f"Кандидатов: {candidates_found}\n\n"
-                f"Попробуй позже или ослабь фильтры."
+                f"Кандидатов: {candidates_found}"
             )
             return
 
@@ -265,20 +251,18 @@ async def cmd_discover(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
         for i, w in enumerate(valid, 1):
+            win = f"{w['win_rate']:.0f}%" if w['win_rate'] is not None else "—"
+            pnl = f"{w['pnl_sol']:+.4f}" if w['pnl_sol'] is not None else "—"
             text += (
-                f"{i}. `{w['wallet']}`\n"
-                f"   Win rate: {w['win_rate']:.0f}%\n"
-                f"   PnL: {w['pnl_sol']:+.4f} SOL\n"
-                f"   Закрытых: {w['closed']}, сделок/день: {w['trades_per_day']}\n"
-                f"   Токены: {', '.join(w['tokens_bought'][:3])}\n\n"
+                f"{i}. {w['wallet']}\n"
+                f"   Win rate: {win}\n"
+                f"   PnL: {pnl} SOL\n"
+                f"   Роль: {w.get('role', '?')}\n"
+                f"   Закрытых: {w['closed']}, открытых: {w.get('open_positions', 0)}\n\n"
             )
 
-        text += (
-            "💡 Добавить в мониторинг:\n"
-            "`/watch <wallet>`"
-        )
-
-        await msg.edit_text(text, parse_mode="Markdown")
+        text += "💡 Добавить в мониторинг: /watch <wallet>"
+        await msg.edit_text(text)
 
     except Exception as e:
         logger.exception("Ошибка /discover")
@@ -286,32 +270,15 @@ async def cmd_discover(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ─────────────────────────────────────────────
-# Запуск
+# Создаём Application (без run_polling)
 # ─────────────────────────────────────────────
 
-def main():
-    app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
-    app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CommandHandler("help", cmd_help))
-    app.add_handler(CommandHandler("check", cmd_check))
-    app.add_handler(CommandHandler("watch", cmd_watch))
-    app.add_handler(CommandHandler("unwatch", cmd_unwatch))
-    app.add_handler(CommandHandler("list", cmd_list))
-    app.add_handler(CommandHandler("discover", cmd_discover))
-
-    print("🤖 Бот запущен.")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
-
-
-if __name__ == "__main__":
-    from keep_alive import keep_alive
-    keep_alive()
-
-    import threading
-    from watcher import run_watcher_loop
-
-    watcher_thread = threading.Thread(target=run_watcher_loop, daemon=True)
-    watcher_thread.start()
-
-    main()
+app.add_handler(CommandHandler("start", cmd_start))
+app.add_handler(CommandHandler("help", cmd_help))
+app.add_handler(CommandHandler("check", cmd_check))
+app.add_handler(CommandHandler("watch", cmd_watch))
+app.add_handler(CommandHandler("unwatch", cmd_unwatch))
+app.add_handler(CommandHandler("list", cmd_list))
+app.add_handler(CommandHandler("discover", cmd_discover))
