@@ -1,5 +1,5 @@
 """
-Watcher — фоновый мониторинг кошельков.
+Watcher — фоновый мониторинг кошельков с хранением в Upstash Redis.
 Каждые N секунд проверяет новые транзакции в отслеживаемых кошельках
 и присылает сигналы в Telegram при новых покупках.
 """
@@ -17,17 +17,23 @@ load_dotenv()
 HELIUS_API_KEY = os.getenv("HELIUS_API_KEY")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+UPSTASH_URL = os.getenv("UPSTASH_REDIS_REST_URL")
+UPSTASH_TOKEN = os.getenv("UPSTASH_REDIS_REST_TOKEN")
 
 if not HELIUS_API_KEY:
     raise ValueError("Нет HELIUS_API_KEY в .env!")
+if not UPSTASH_URL or not UPSTASH_TOKEN:
+    raise ValueError("Нет UPSTASH_REDIS_REST_URL или UPSTASH_REDIS_REST_TOKEN в .env!")
 
 logger = logging.getLogger(__name__)
 
-WATCH_FILE = "watched_wallets.json"
 BASE_URL = "https://api.helius.xyz/v0/addresses/{address}/transactions"
 SOL_MINT = "So11111111111111111111111111111111111111112"
 
 CHECK_INTERVAL = 300  # 5 минут
+
+# Ключ в Upstash, где хранится JSON со списком кошельков
+UPSTASH_KEY = "memecoin_agent:watched_wallets"
 
 
 # ─────────────────────────────────────────────
@@ -40,26 +46,56 @@ NOTIFY_REJECT = False
 
 
 # ─────────────────────────────────────────────
-# Хранилище
+# UPSTASH: хранилище
 # ─────────────────────────────────────────────
 
+def upstash_command(*args):
+    """
+    Отправляет команду в Upstash Redis через REST API.
+    Возвращает поле 'result' из ответа.
+    """
+    url = UPSTASH_URL
+    headers = {
+        "Authorization": f"Bearer {UPSTASH_TOKEN}",
+        "Content-Type": "application/json",
+    }
+    try:
+        r = requests.post(url, headers=headers, json=list(args), timeout=15)
+        r.raise_for_status()
+        data = r.json()
+        return data.get("result")
+    except Exception as e:
+        logger.error(f"Ошибка Upstash: {e}")
+        return None
+
+
 def load_watch_data():
-    if not os.path.exists(WATCH_FILE):
+    """Загружает JSON со списком кошельков из Upstash."""
+    raw = upstash_command("GET", UPSTASH_KEY)
+    if not raw:
         return {}
     try:
-        with open(WATCH_FILE, "r") as f:
-            return json.load(f)
+        # Upstash возвращает строку, внутри которой JSON
+        if isinstance(raw, str):
+            return json.loads(raw)
+        return raw if isinstance(raw, dict) else {}
     except Exception as e:
-        logger.error(f"Ошибка чтения {WATCH_FILE}: {e}")
+        logger.error(f"Ошибка парсинга JSON из Upstash: {e}")
         return {}
 
 
 def save_watch_data(data):
+    """Сохраняет JSON со списком кошельков в Upstash."""
     try:
-        with open(WATCH_FILE, "w") as f:
-            json.dump(data, f, indent=2)
+        payload = json.dumps(data, ensure_ascii=False)
+        result = upstash_command("SET", UPSTASH_KEY, payload)
+        if result == "OK":
+            return True
+        logger.warning(f"Upstash SET вернул: {result}")
+        return False
     except Exception as e:
-        logger.error(f"Ошибка записи {WATCH_FILE}: {e}")
+        logger.error(f"Ошибка сохранения в Upstash: {e}")
+        return False
 
 
 def add_wallet(wallet: str):
@@ -167,7 +203,6 @@ def send_telegram_message(text: str):
 
 
 def notify_new_buy(wallet: str, buy_info: dict):
-    """Формирует и отправляет сигнал о новой покупке (с фильтрацией)."""
     token = buy_info["token"]
     sol_amount = buy_info["sol_amount"]
 
@@ -181,7 +216,6 @@ def notify_new_buy(wallet: str, buy_info: dict):
         breakdown = result.get("breakdown", {}) or {}
         sm_stats = result.get("smart_money_stats", {}) or {}
 
-        # ─── Фильтрация ───
         if verdict == "REJECT" and not NOTIFY_REJECT:
             logger.info(f"⏭️  REJECT отфильтрован: {token[:8]}...")
             return
@@ -194,7 +228,6 @@ def notify_new_buy(wallet: str, buy_info: dict):
             logger.info(f"⏭️  WEAK отфильтрован: {token[:8]}...")
             return
 
-        # ─── Формируем сообщение ───
         emoji = {
             "SIGNAL": "🚀",
             "WEAK": "⚠️",
@@ -232,7 +265,6 @@ def notify_new_buy(wallet: str, buy_info: dict):
                     f"└ PnL:      {pnl if pnl is not None else '—'} SOL\n"
                 )
         else:
-            # Краткий отчёт с ПОЛНЫМ адресом токена
             text = (
                 f"{emoji} Слабый сигнал ({verdict})\n"
                 f"Confidence: {confidence:.3f}\n\n"
@@ -276,7 +308,7 @@ def check_wallet(wallet: str, watch_data: dict):
 
 
 def run_watcher_loop():
-    logger.info("👁️  Watcher запущен")
+    logger.info("👁️  Watcher запущен (Upstash)")
     time.sleep(60)
 
     while True:
