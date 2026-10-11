@@ -62,22 +62,19 @@ def fmt_amount(v):
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 Привет! Я агент для анализа мемкоинов.\n\n"
-        "Команды:\n"
-        "/check <token> <wallet> — проверить токен и кошелёк\n"
-        "/watch <wallet> — добавить в отслеживание\n"
-        "/unwatch <wallet> — удалить\n"
-        "/list — список отслеживаемых\n"
-        "/discover — найти умные кошельки\n"
-        "/help — справка"
+        "/check <token> <wallet>\n"
+        "/watch <wallet>\n/unwatch <wallet>\n/list\n"
+        "/discover — найти умные кошельки (win rate ≥ 50%)\n"
+        "/help"
     )
 
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "📖 Как использовать:\n\n"
-        "🔍 /check <token> <wallet>\n\n"
-        "👁️ /watch <wallet>\n/unwatch <wallet>\n/list\n\n"
-        "🎯 /discover — автопоиск (win rate ≥ 50%)"
+        "📖 Команды:\n\n"
+        "/check <token> <wallet>\n"
+        "/watch <wallet>\n/unwatch <wallet>\n/list\n"
+        "/discover"
     )
 
 
@@ -86,10 +83,8 @@ async def cmd_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(args) != 2:
         await update.message.reply_text("❌ /check <token> <wallet>")
         return
-
     token_mint, wallet_address = args
     msg = await update.message.reply_text(f"⏳ Проверяю {token_mint[:8]}...")
-
     try:
         result = evaluate_signal(token_mint, wallet_address)
         verdict = result.get("verdict", "UNKNOWN")
@@ -97,9 +92,7 @@ async def cmd_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
         breakdown = result.get("breakdown", {}) or {}
         sm_stats = result.get("smart_money_stats", {}) or {}
         reason = result.get("reason", "")
-
         emoji = {"SIGNAL": "🚀", "WEAK": "⚠️", "IGNORE": "❌", "REJECT": "🛑"}.get(verdict, "❓")
-
         text = f"{emoji} Вердикт: {verdict}\nConfidence: {confidence:.3f}\n"
         if reason:
             text += f"\n💬 {reason}\n"
@@ -109,7 +102,6 @@ async def cmd_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"├ Smart Money: {fmt_score(breakdown.get('smart_money'))}\n"
             f"└ Liquidity:   {fmt_score(breakdown.get('liquidity'))}\n"
         )
-
         if sm_stats:
             text += (
                 f"\n🧠 Smart Money:\n"
@@ -118,14 +110,12 @@ async def cmd_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"├ Win rate: {fmt_percent(sm_stats.get('win_rate'))}\n"
                 f"└ PnL:      {fmt_sol(sm_stats.get('total_pnl_sol'))}\n"
             )
-
         portfolio = result.get("portfolio")
         if portfolio:
             tokens = portfolio.get("tokens", [])
             text += (
                 f"\n💰 Портфель:\n"
-                f"├ SOL:     {fmt_amount(portfolio.get('sol_balance', 0))} SOL "
-                f"({fmt_usd(portfolio.get('sol_value_usd', 0))})\n"
+                f"├ SOL:     {fmt_amount(portfolio.get('sol_balance', 0))} SOL ({fmt_usd(portfolio.get('sol_value_usd', 0))})\n"
                 f"├ Токенов: {portfolio.get('tokens_count', 0)}\n"
                 f"└ Итого:   {fmt_usd(portfolio.get('total_portfolio_usd', 0))}\n"
             )
@@ -134,9 +124,7 @@ async def cmd_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 for t in tokens[:5]:
                     name = t.get("name") or t.get("mint", "")[:8]
                     text += f"├ {name} — {fmt_amount(t.get('amount', 0))} tok ({fmt_usd(t.get('value_usd', 0))})\n"
-
         await msg.edit_text(text)
-
     except Exception as e:
         logger.exception("Ошибка /check")
         await msg.edit_text(f"❌ Ошибка: {e}")
@@ -151,7 +139,7 @@ async def cmd_watch(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if add_wallet(wallet):
         await update.message.reply_text(f"✅ Добавлен:\n{wallet}")
     else:
-        await update.message.reply_text(f"⚠️ Уже отслеживается:\n{wallet}")
+        await update.message.reply_text(f"⚠️ Уже отслеживается")
 
 
 async def cmd_unwatch(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -163,13 +151,13 @@ async def cmd_unwatch(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if remove_wallet(wallet):
         await update.message.reply_text(f"✅ Удалён:\n{wallet}")
     else:
-        await update.message.reply_text(f"⚠️ Не найден:\n{wallet}")
+        await update.message.reply_text(f"⚠️ Не найден")
 
 
 async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     wallets = list_wallets()
     if not wallets:
-        await update.message.reply_text("📭 Список пуст.\nДобавь: /watch <wallet>")
+        await update.message.reply_text("📭 Список пуст.")
         return
     text = f"👁️  Отслеживаемые ({len(wallets)}):\n\n"
     for i, w in enumerate(wallets, 1):
@@ -179,16 +167,14 @@ async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_discover(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text(
-        "🔍 Начинаю автопоиск умных кошельков...\n\n"
+        "🔍 Автопоиск...\n\n"
         "Ищу трейдеров в свежих pump.fun токенах.\n"
         "Фильтр: win rate ≥ 50%.\n\n"
-        "Это займёт 1-2 минуты."
+        "1-2 минуты."
     )
-
     try:
         import asyncio
         from discovery import discover_smart_wallets
-
         loop = asyncio.get_event_loop()
         result = await loop.run_in_executor(None, discover_smart_wallets)
 
@@ -205,7 +191,7 @@ async def cmd_discover(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"😔 Не найдено (win rate ≥ 50%).\n\n"
                 f"Проверено токенов: {tokens_checked}\n"
                 f"Кандидатов: {candidates_found}\n\n"
-                f"💡 Win rate 50% — строгий фильтр. Попробуй позже."
+                f"💡 Win rate 50% — строгий фильтр."
             )
             return
 
@@ -213,20 +199,17 @@ async def cmd_discover(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🎯 Найдено {len(valid)} кошельков (win rate ≥ 50%):\n"
             f"(проверено {tokens_checked} токенов, {candidates_found} кандидатов)\n\n"
         )
-
         for i, w in enumerate(valid, 1):
             win = f"{w['win_rate']:.0f}%" if w['win_rate'] is not None else "—"
             pnl = f"{w['pnl_sol']:+.4f}" if w['pnl_sol'] is not None else "—"
             text += (
-                f"{i}. {w['wallet']}\n"
+                f"{i}. `{w['wallet']}`\n"
                 f"   Win: {win}, PnL: {pnl} SOL\n"
                 f"   Роль: {w.get('role', '?')}\n"
                 f"   Сделок/день: {w.get('trades_per_day', '—')}\n\n"
             )
-
-        text += "💡 /watch <wallet> — добавить в мониторинг"
-        await msg.edit_text(text)
-
+        text += "💡 /watch <wallet> — добавить"
+        await msg.edit_text(text, parse_mode="Markdown")
     except Exception as e:
         logger.exception("Ошибка /discover")
         await msg.edit_text(f"❌ Ошибка: {e}")

@@ -18,10 +18,6 @@ _token_prices = {}
 _sol_price_usd = None
 
 
-# ─────────────────────────────────────────────
-# Имена и цены
-# ─────────────────────────────────────────────
-
 def get_token_name(mint: str):
     if mint in _token_names:
         return _token_names[mint]
@@ -29,12 +25,7 @@ def get_token_name(mint: str):
         _token_names[mint] = "SOL"
         return "SOL"
 
-    payload = {
-        "jsonrpc": "2.0",
-        "id": "1",
-        "method": "getAsset",
-        "params": {"id": mint},
-    }
+    payload = {"jsonrpc": "2.0", "id": "1", "method": "getAsset", "params": {"id": mint}}
     try:
         r = requests.post(RPC_URL, json=payload, timeout=10)
         r.raise_for_status()
@@ -43,7 +34,6 @@ def get_token_name(mint: str):
         if not result:
             _token_names[mint] = mint[:6]
             return _token_names[mint]
-
         content = result.get("content", {})
         metadata = content.get("metadata", {})
         name = metadata.get("name") or metadata.get("symbol") or mint[:6]
@@ -61,10 +51,7 @@ def get_sol_price_usd():
     if _sol_price_usd is not None:
         return _sol_price_usd
     try:
-        r = requests.get(
-            f"https://api.dexscreener.com/latest/dex/tokens/{SOL_MINT}",
-            timeout=10,
-        )
+        r = requests.get(f"https://api.dexscreener.com/latest/dex/tokens/{SOL_MINT}", timeout=10)
         r.raise_for_status()
         data = r.json()
         pairs = data.get("pairs", [])
@@ -82,10 +69,7 @@ def get_token_price_usd(mint: str):
     if mint in _token_prices:
         return _token_prices[mint]
     try:
-        r = requests.get(
-            f"https://api.dexscreener.com/latest/dex/tokens/{mint}",
-            timeout=10,
-        )
+        r = requests.get(f"https://api.dexscreener.com/latest/dex/tokens/{mint}", timeout=10)
         r.raise_for_status()
         data = r.json()
         pairs = data.get("pairs", [])
@@ -101,17 +85,8 @@ def get_token_price_usd(mint: str):
         return None
 
 
-# ─────────────────────────────────────────────
-# Балансы
-# ─────────────────────────────────────────────
-
 def get_sol_balance(address: str):
-    payload = {
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "getBalance",
-        "params": [address],
-    }
+    payload = {"jsonrpc": "2.0", "id": 1, "method": "getBalance", "params": [address]}
     try:
         r = requests.post(RPC_URL, json=payload, timeout=15)
         r.raise_for_status()
@@ -171,11 +146,8 @@ def summarize_portfolio(address: str):
         value_usd = amount * price_usd if price_usd else 0
         name = get_token_name(mint)
         tokens_with_value.append({
-            "mint": mint,
-            "name": name,
-            "amount": amount,
-            "price_usd": price_usd,
-            "value_usd": value_usd,
+            "mint": mint, "name": name, "amount": amount,
+            "price_usd": price_usd, "value_usd": value_usd,
         })
 
     tokens_with_value.sort(key=lambda x: x["value_usd"], reverse=True)
@@ -192,17 +164,10 @@ def summarize_portfolio(address: str):
     }
 
 
-# ─────────────────────────────────────────────
-# Транзакции
-# ─────────────────────────────────────────────
-
 def fetch_transactions(address, limit=100, before=None):
+    """Загружает транзакции БЕЗ фильтра type=SWAP (чтобы ловить pump.fun)."""
     url = BASE_URL.format(address=address)
-    params = {
-        "api-key": HELIUS_API_KEY,
-        "limit": limit,
-        "type": "SWAP",
-    }
+    params = {"api-key": HELIUS_API_KEY, "limit": limit}
     if before:
         params["before"] = before
     try:
@@ -214,7 +179,7 @@ def fetch_transactions(address, limit=100, before=None):
         return []
 
 
-def fetch_all_swaps(address, max_pages=5):
+def fetch_all_swaps(address, max_pages=3):
     all_txs = []
     before = None
     for page in range(max_pages):
@@ -226,13 +191,16 @@ def fetch_all_swaps(address, max_pages=5):
         if len(txs) < 100:
             break
         before = txs[-1]["signature"]
-        time.sleep(0.5)
+        time.sleep(0.3)
     return all_txs
 
 
 def parse_swap(tx, wallet_address):
-    if tx.get("type") != "SWAP":
+    """Ищет SWAP-транзакции. Расширено для pump.fun."""
+    tx_type = tx.get("type", "")
+    if tx_type not in ("SWAP", "UNKNOWN", "TRANSFER"):
         return None
+
     transfers = tx.get("tokenTransfers", [])
     if not transfers:
         return None
@@ -352,28 +320,21 @@ def summarize_open_positions(positions):
         total_sol = sum(b["sol_spent"] for b in buys)
         if total_tokens <= 0:
             continue
-
         avg_price_sol = total_sol / total_tokens if total_tokens else 0
         first_ts = min(b["timestamp"] for b in buys)
-
         token_price_usd = get_token_price_usd(token)
         current_value_usd = None
         unrealized_pnl_sol = None
         unrealized_pnl_pct = None
-
         if token_price_usd and sol_price:
             current_value_usd = total_tokens * token_price_usd
             current_value_sol = current_value_usd / sol_price
             unrealized_pnl_sol = current_value_sol - total_sol
             if total_sol > 0:
                 unrealized_pnl_pct = (unrealized_pnl_sol / total_sol) * 100
-
         summary.append({
-            "token": token,
-            "tokens": total_tokens,
-            "sol_invested": total_sol,
-            "avg_price_sol": avg_price_sol,
-            "first_buy_ts": first_ts,
+            "token": token, "tokens": total_tokens, "sol_invested": total_sol,
+            "avg_price_sol": avg_price_sol, "first_buy_ts": first_ts,
             "unrealized_pnl_sol": unrealized_pnl_sol,
             "unrealized_pnl_pct": unrealized_pnl_pct,
             "current_value_usd": current_value_usd,
@@ -388,7 +349,7 @@ def analyze_wallet(address):
     print("💰 Считаем баланс кошелька...")
     portfolio = summarize_portfolio(address)
 
-    txs = fetch_all_swaps(address, max_pages=5)
+    txs = fetch_all_swaps(address, max_pages=3)
     if not txs:
         return {
             "verdict": "UNKNOWN",
@@ -397,10 +358,9 @@ def analyze_wallet(address):
             "portfolio": portfolio,
         }
 
-    print(f"\n📊 Всего свопов: {len(txs)}")
+    print(f"\n📊 Всего транзакций: {len(txs)}")
 
     now = time.time()
-    # ОКНО 3 ДНЯ (вместо 30)
     txs_recent = [t for t in txs if t.get("timestamp", 0) > now - 3 * 86400]
     print(f"📅 За 3 дня: {len(txs_recent)}")
 
@@ -408,8 +368,8 @@ def analyze_wallet(address):
 
     print(f"\n🛒 Покупок: {buys}")
     print(f"💸 Продаж: {sells}")
-    print(f"📈 Закрытых позиций: {len(closed)}")
-    print(f"📦 Открытых токенов: {len(open_positions)}")
+    print(f"📈 Закрытых: {len(closed)}")
+    print(f"📦 Открытых: {len(open_positions)}")
 
     closed_with_sol = []
     total_pnl_sol = 0
@@ -424,73 +384,8 @@ def analyze_wallet(address):
 
         total_pnl_sol = sum(p["pnl_sol"] for p in closed_with_sol)
         win_rate = (len(winners) / len(closed_with_sol) * 100) if closed_with_sol else 0
-
         avg_win = sum(p["pnl_sol"] for p in winners) / len(winners) if winners else 0
         avg_loss = sum(p["pnl_sol"] for p in losers) / len(losers) if losers else 0
-
-        print(f"\n{'=' * 60}")
-        print(f"💎 Закрытых с точным SOL: {len(closed_with_sol)}")
-        print(f"💰 Реализованный PnL: {total_pnl_sol:+.4f} SOL")
-        print(f"🎯 Win rate: {win_rate:.1f}% ({len(winners)} / {len(closed_with_sol)})")
-        if winners:
-            print(f"🟢 Средний выигрыш: +{avg_win:.4f} SOL")
-        if losers:
-            print(f"🔴 Средний проигрыш: {avg_loss:.4f} SOL")
-
-        sorted_by_pnl = sorted(closed_with_sol, key=lambda p: p["pnl_sol"], reverse=True)
-
-        print(f"\n🏆 Топ-3 прибыльных:")
-        shown = 0
-        for p in sorted_by_pnl:
-            if p["pnl_sol"] > 0 and shown < 3:
-                name = get_token_name(p["token"])
-                print(f"   {name:<28} → {p['pnl_sol']:+.4f} SOL ({p['pnl_percent']:+.1f}%)")
-                shown += 1
-
-        print(f"\n💀 Топ-3 убыточных:")
-        shown = 0
-        for p in reversed(sorted_by_pnl):
-            if p["pnl_sol"] < 0 and shown < 3:
-                name = get_token_name(p["token"])
-                print(f"   {name:<28} → {p['pnl_sol']:+.4f} SOL ({p['pnl_percent']:+.1f}%)")
-                shown += 1
-
-        print(f"{'=' * 60}")
-
-    open_summary = summarize_open_positions(open_positions)
-    total_open_sol = 0
-    total_unrealized_sol = 0
-
-    if open_summary:
-        total_open_sol = sum(p["sol_invested"] for p in open_summary)
-        known_pnl = [p["unrealized_pnl_sol"] for p in open_summary if p["unrealized_pnl_sol"] is not None]
-        total_unrealized_sol = sum(known_pnl)
-
-        print(f"\n{'=' * 60}")
-        print(f"📦 ОТКРЫТЫЕ ПОЗИЦИИ (топ-10, всего: {len(open_summary)})")
-        print(f"💼 Суммарно вложено: {total_open_sol:.4f} SOL")
-        print(f"📊 Нереализованный PnL: {total_unrealized_sol:+.4f} SOL "
-              f"({len(known_pnl)}/{len(open_summary)} с ценой)")
-        print(f"{'-' * 60}")
-
-        for i, pos in enumerate(open_summary[:10]):
-            name = get_token_name(pos["token"])
-            dt = time.strftime("%Y-%m-%d", time.localtime(pos["first_buy_ts"]))
-            try:
-                if pos["unrealized_pnl_sol"] is not None and pos["unrealized_pnl_pct"] is not None:
-                    pnl_str = f"{pos['unrealized_pnl_sol']:+.4f} SOL ({pos['unrealized_pnl_pct']:+.1f}%)"
-                else:
-                    pnl_str = "нет цены"
-            except (TypeError, ValueError):
-                pnl_str = "нет цены"
-            print(
-                f"#{i+1:2} {name:<26} "
-                f"| {pos['tokens']:>15,.0f} tok "
-                f"| {pos['sol_invested']:.4f} SOL "
-                f"| PnL: {pnl_str} "
-                f"| {dt}"
-            )
-        print(f"{'=' * 60}")
 
     if closed_with_sol:
         if win_rate >= 50 and total_pnl_sol > 0 and len(closed_with_sol) >= 3:
@@ -504,24 +399,20 @@ def analyze_wallet(address):
             reason = f"❌ Убыточный: win rate {win_rate:.0f}%, PnL {total_pnl_sol:+.4f} SOL."
     else:
         verdict = "UNKNOWN"
-        reason = f"❓ Нет закрытых позиций. Покупок: {buys}, продаж: {sells}."
+        reason = f"❓ Нет закрытых. Покупок: {buys}, продаж: {sells}."
 
     return {
         "verdict": verdict,
         "reason": reason,
         "stats": {
-            "swaps_recent": len(txs_recent),
-            "buys": buys,
-            "sells": sells,
+            "buys": buys, "sells": sells,
             "closed_positions": len(closed),
             "closed_with_sol": len(closed_with_sol),
-            "open_positions": len(open_summary),
+            "open_positions": len(open_positions),
             "win_rate": round(win_rate, 1) if closed_with_sol else None,
             "total_pnl_sol": round(total_pnl_sol, 4) if closed_with_sol else None,
             "avg_win_sol": round(avg_win, 4) if closed_with_sol else None,
             "avg_loss_sol": round(avg_loss, 4) if closed_with_sol else None,
-            "total_open_sol": round(total_open_sol, 4) if open_summary else 0,
-            "total_unrealized_sol": round(total_unrealized_sol, 4) if open_summary else 0,
         },
         "portfolio": portfolio,
     }
