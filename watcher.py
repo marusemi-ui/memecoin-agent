@@ -31,13 +31,25 @@ SOL_MINT = "So11111111111111111111111111111111111111112"
 # Интервал проверки (в секундах)
 CHECK_INTERVAL = 300  # 5 минут
 
+# ─────────────────────────────────────────────
+# НАСТРОЙКИ ФИЛЬТРАЦИИ
+# ─────────────────────────────────────────────
+
+# Присылать ли WEAK-сигналы (0.45 ≤ confidence < 0.65)
+NOTIFY_WEAK = True
+
+# Присылать ли IGNORE-сигналы (confidence < 0.45)
+NOTIFY_IGNORE = False
+
+# Присылать ли REJECT-сигналы (Safety Gate отклонил)
+NOTIFY_REJECT = False
+
 
 # ─────────────────────────────────────────────
 # Хранилище
 # ─────────────────────────────────────────────
 
 def load_watch_data():
-    """Загружает данные мониторинга из JSON."""
     if not os.path.exists(WATCH_FILE):
         return {}
     try:
@@ -49,7 +61,6 @@ def load_watch_data():
 
 
 def save_watch_data(data):
-    """Сохраняет данные мониторинга в JSON."""
     try:
         with open(WATCH_FILE, "w") as f:
             json.dump(data, f, indent=2)
@@ -58,7 +69,6 @@ def save_watch_data(data):
 
 
 def add_wallet(wallet: str):
-    """Добавляет кошелёк в отслеживание."""
     data = load_watch_data()
     if wallet in data:
         return False
@@ -71,7 +81,6 @@ def add_wallet(wallet: str):
 
 
 def remove_wallet(wallet: str):
-    """Удаляет кошелёк из отслеживания."""
     data = load_watch_data()
     if wallet not in data:
         return False
@@ -81,7 +90,6 @@ def remove_wallet(wallet: str):
 
 
 def list_wallets():
-    """Возвращает список отслеживаемых кошельков."""
     return list(load_watch_data().keys())
 
 
@@ -90,7 +98,6 @@ def list_wallets():
 # ─────────────────────────────────────────────
 
 def fetch_recent_swaps(address: str, limit: int = 20):
-    """Загружает последние свопы кошелька."""
     url = BASE_URL.format(address=address)
     params = {
         "api-key": HELIUS_API_KEY,
@@ -107,7 +114,6 @@ def fetch_recent_swaps(address: str, limit: int = 20):
 
 
 def parse_buy(tx, wallet_address):
-    """Определяет, была ли это покупка. Возвращает mint или None."""
     if tx.get("type") != "SWAP":
         return None
 
@@ -149,7 +155,6 @@ def parse_buy(tx, wallet_address):
 # ─────────────────────────────────────────────
 
 def send_telegram_message(text: str):
-    """Отправляет сообщение в Telegram."""
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         logger.warning("Нет TELEGRAM_BOT_TOKEN или TELEGRAM_CHAT_ID")
         return
@@ -168,20 +173,11 @@ def send_telegram_message(text: str):
 
 
 def notify_new_buy(wallet: str, buy_info: dict):
-    """Формирует и отправляет сигнал о новой покупке."""
+    """Формирует и отправляет сигнал о новой покупке (с фильтрацией)."""
     token = buy_info["token"]
     sol_amount = buy_info["sol_amount"]
 
     logger.info(f"🔔 Новая покупка: {wallet[:8]}... купил {token[:8]}...")
-
-    # Показываем промежуточное сообщение
-    send_telegram_message(
-        f"🔔 Новая покупка!\n\n"
-        f"Кошелёк: {wallet[:8]}...\n"
-        f"Токен: {token[:8]}...\n"
-        f"Потрачено: {sol_amount:.4f} SOL\n\n"
-        f"⏳ Анализирую токен и кошелёк..."
-    )
 
     # Прогоняем через агента
     try:
@@ -192,6 +188,20 @@ def notify_new_buy(wallet: str, buy_info: dict):
         breakdown = result.get("breakdown", {}) or {}
         sm_stats = result.get("smart_money_stats", {}) or {}
 
+        # ─── ФИЛЬТРАЦИЯ ───
+        if verdict == "REJECT" and not NOTIFY_REJECT:
+            logger.info(f"⏭️  REJECT отфильтрован: {token[:8]}...")
+            return
+
+        if verdict == "IGNORE" and not NOTIFY_IGNORE:
+            logger.info(f"⏭️  IGNORE отфильтрован: {token[:8]}...")
+            return
+
+        if verdict == "WEAK" and not NOTIFY_WEAK:
+            logger.info(f"⏭️  WEAK отфильтрован: {token[:8]}...")
+            return
+
+        # ─── Формируем сообщение ───
         emoji = {
             "SIGNAL": "🚀",
             "WEAK": "⚠️",
@@ -207,31 +217,41 @@ def notify_new_buy(wallet: str, buy_info: dict):
             except (TypeError, ValueError):
                 return "—"
 
-        text = (
-            f"{emoji} Вердикт: {verdict}\n"
-            f"Confidence: {confidence:.3f}\n\n"
-            f"🪙 Токен: {token[:8]}...\n"
-            f"💰 Потрачено: {sol_amount:.4f} SOL\n\n"
-            f"📊 Разбивка:\n"
-            f"├ Safety:      {fmt(breakdown.get('safety'))}\n"
-            f"├ Smart Money: {fmt(breakdown.get('smart_money'))}\n"
-            f"└ Liquidity:   {fmt(breakdown.get('liquidity'))}\n"
-        )
+        if verdict == "SIGNAL":
+            # Полный отчёт для сильного сигнала
+            text = (
+                f"{emoji} СИЛЬНЫЙ СИГНАЛ!\n"
+                f"Confidence: {confidence:.3f}\n\n"
+                f"🪙 Токен: {token}\n"
+                f"👤 Кошелёк: {wallet}\n"
+                f"💰 Потрачено: {sol_amount:.4f} SOL\n\n"
+                f"📊 Разбивка:\n"
+                f"├ Safety:      {fmt(breakdown.get('safety'))}\n"
+                f"├ Smart Money: {fmt(breakdown.get('smart_money'))}\n"
+                f"└ Liquidity:   {fmt(breakdown.get('liquidity'))}\n"
+            )
 
-        win_rate = sm_stats.get("win_rate")
-        pnl = sm_stats.get("total_pnl_sol")
-        if win_rate is not None or pnl is not None:
-            text += (
-                f"\n🧠 Smart Money:\n"
-                f"├ Win rate: {win_rate if win_rate is not None else '—'}%\n"
-                f"└ PnL:      {pnl if pnl is not None else '—'} SOL\n"
+            win_rate = sm_stats.get("win_rate")
+            pnl = sm_stats.get("total_pnl_sol")
+            if win_rate is not None or pnl is not None:
+                text += (
+                    f"\n🧠 Smart Money:\n"
+                    f"├ Win rate: {win_rate if win_rate is not None else '—'}%\n"
+                    f"└ PnL:      {pnl if pnl is not None else '—'} SOL\n"
+                )
+        else:
+            # Краткий отчёт для WEAK/IGNORE
+            text = (
+                f"{emoji} Слабый сигнал ({verdict})\n"
+                f"Confidence: {confidence:.3f}\n\n"
+                f"🪙 Токен: {token[:12]}...\n"
+                f"💰 Потрачено: {sol_amount:.4f} SOL\n"
             )
 
         send_telegram_message(text)
 
     except Exception as e:
         logger.exception("Ошибка анализа покупки")
-        send_telegram_message(f"❌ Ошибка анализа: {e}")
 
 
 # ─────────────────────────────────────────────
@@ -239,14 +259,12 @@ def notify_new_buy(wallet: str, buy_info: dict):
 # ─────────────────────────────────────────────
 
 def check_wallet(wallet: str, watch_data: dict):
-    """Проверяет один кошелёк на новые покупки."""
     txs = fetch_recent_swaps(wallet, limit=20)
     if not txs:
         return
 
     last_signature = watch_data.get(wallet, {}).get("last_signature")
 
-    # Helius возвращает от новых к старым
     new_txs = []
     for tx in txs:
         sig = tx.get("signature")
@@ -257,10 +275,8 @@ def check_wallet(wallet: str, watch_data: dict):
     if not new_txs:
         return
 
-    # Обновляем last_signature на самый свежий
     watch_data[wallet]["last_signature"] = txs[0].get("signature")
 
-    # Обрабатываем новые транзакции (от старых к новым)
     for tx in reversed(new_txs):
         buy = parse_buy(tx, wallet)
         if buy:
@@ -268,9 +284,8 @@ def check_wallet(wallet: str, watch_data: dict):
 
 
 def run_watcher_loop():
-    """Основной цикл мониторинга."""
     logger.info("👁️  Watcher запущен")
-    time.sleep(60)  # Ждём инициализации бота
+    time.sleep(60)
 
     while True:
         try:

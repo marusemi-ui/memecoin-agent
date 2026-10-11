@@ -2,3 +2,4 @@
 __pycache__/
 *.pyc
 .venv/
+watched_wallets.json
