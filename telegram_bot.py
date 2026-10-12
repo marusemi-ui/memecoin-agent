@@ -62,9 +62,12 @@ def fmt_amount(v):
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 Привет! Я агент для анализа мемкоинов.\n\n"
+        "Команды:\n"
         "/check <token> <wallet>\n"
-        "/watch <wallet>\n/unwatch <wallet>\n/list\n"
-        "/discover — найти умные кошельки (win rate ≥ 50%)\n"
+        "/watch <wallet>\n"
+        "/unwatch <wallet>\n"
+        "/list\n"
+        "/discover — найти умные кошельки (win ≥ 45%, PnL ≥ 5 SOL)\n"
         "/help"
     )
 
@@ -72,9 +75,11 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "📖 Команды:\n\n"
-        "/check <token> <wallet>\n"
-        "/watch <wallet>\n/unwatch <wallet>\n/list\n"
-        "/discover"
+        "/check <token> <wallet> — проверить токен\n"
+        "/watch <wallet> — добавить в мониторинг\n"
+        "/unwatch <wallet> — удалить\n"
+        "/list — показать список\n"
+        "/discover — автопоиск (win ≥ 45%, PnL ≥ 5 SOL)"
     )
 
 
@@ -168,13 +173,13 @@ async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_discover(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text(
         "🔍 Автопоиск...\n\n"
-        "Ищу трейдеров в свежих pump.fun токенах.\n"
-        "Фильтр: win rate ≥ 50%.\n\n"
+        "pump.fun + Smart Money\n"
+        "Фильтр: win rate ≥ 45%, PnL ≥ 5 SOL\n\n"
         "1-2 минуты."
     )
     try:
         import asyncio
-        from discovery import discover_smart_wallets
+        from discovery import discover_smart_wallets, MIN_WIN_RATE, MIN_PNL_SOL
         loop = asyncio.get_event_loop()
         result = await loop.run_in_executor(None, discover_smart_wallets)
 
@@ -188,16 +193,18 @@ async def cmd_discover(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if not valid:
             await msg.edit_text(
-                f"😔 Не найдено (win rate ≥ 50%).\n\n"
+                f"😔 Не найдено.\n\n"
+                f"Фильтр: win ≥ {MIN_WIN_RATE}%, PnL ≥ {MIN_PNL_SOL} SOL\n"
                 f"Проверено токенов: {tokens_checked}\n"
                 f"Кандидатов: {candidates_found}\n\n"
-                f"💡 Win rate 50% — строгий фильтр."
+                f"💡 Строгий фильтр — попробуй позже."
             )
             return
 
         text = (
-            f"🎯 Найдено {len(valid)} кошельков (win rate ≥ 50%):\n"
-            f"(проверено {tokens_checked} токенов, {candidates_found} кандидатов)\n\n"
+            f"🎯 Найдено {len(valid)} кошельков:\n"
+            f"(win ≥ {MIN_WIN_RATE}%, PnL ≥ {MIN_PNL_SOL} SOL)\n"
+            f"Проверено {tokens_checked} токенов, {candidates_found} кандидатов\n\n"
         )
         for i, w in enumerate(valid, 1):
             win = f"{w['win_rate']:.0f}%" if w['win_rate'] is not None else "—"

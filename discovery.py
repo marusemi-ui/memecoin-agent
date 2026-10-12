@@ -21,10 +21,15 @@ logger = logging.getLogger(__name__)
 RPC_URL = f"https://mainnet.helius-rpc.com/?api-key={HELIUS_API_KEY}"
 SOL_MINT = "So11111111111111111111111111111111111111112"
 
+# ─────────────────────────────────────────────
+# НАСТРОЙКИ
+# ─────────────────────────────────────────────
+
 TOP_TOKENS_LIMIT = 10
 MIN_TOKEN_APPEARANCE = 2
-MIN_WIN_RATE = 50.0
-MAX_TRADES_PER_DAY = 1000
+MIN_WIN_RATE = 45.0          # 45% — реалистичный минимум
+MIN_PNL_SOL = 5.0            # минимум 5 SOL прибыли за 3 дня
+MAX_TRADES_PER_DAY = 200     # 200 — не бот-микро-скальпер
 MAX_CANDIDATES = 30
 MAX_VALIDATE = 20
 
@@ -199,26 +204,29 @@ def validate_candidate(wallet: str):
         total_trades = buys + sells
         trades_per_day = total_trades / 3 if total_trades else 0
 
-        # Логируем полную статистику кандидата
         logger.info(
             f"    📊 {wallet}: swaps={swaps_recent}, buys={buys}, sells={sells}, "
             f"closed={closed}, open={open_pos}, win={win_rate}, pnl={pnl}"
         )
 
+        # Фильтр ботов
         if trades_per_day > MAX_TRADES_PER_DAY:
-            logger.info(f"    ⏭️  {wallet} — бот ({trades_per_day:.0f}/день)")
+            logger.info(f"    ⏭️  бот ({trades_per_day:.0f}/день > {MAX_TRADES_PER_DAY})")
             return None
 
+        # Нет активности
         if not closed and not open_pos and buys == 0 and sells == 0:
-            logger.info(f"    ⏭️  {wallet} — нет активности")
+            logger.info(f"    ⏭️  нет активности")
             return None
 
+        # Win rate
         if closed and win_rate is not None and win_rate < MIN_WIN_RATE:
-            logger.info(f"    ⏭️  {wallet} — win {win_rate:.0f}% < {MIN_WIN_RATE}%")
+            logger.info(f"    ⏭️  win {win_rate:.0f}% < {MIN_WIN_RATE}%")
             return None
 
-        if closed and pnl is not None and pnl < 0:
-            logger.info(f"    ⏭️  {wallet} — PnL {pnl:.4f} < 0")
+        # PnL — ключевой фильтр
+        if closed and pnl is not None and pnl < MIN_PNL_SOL:
+            logger.info(f"    ⏭️  PnL {pnl:.4f} SOL < {MIN_PNL_SOL} SOL")
             return None
 
         return {
@@ -243,6 +251,7 @@ def discover_smart_wallets():
 def _discover_impl():
     logger.info("=" * 60)
     logger.info("🔍 НАЧИНАЮ АВТОПОИСК УМНЫХ КОШЕЛЬКОВ")
+    logger.info(f"   Фильтр: win rate ≥ {MIN_WIN_RATE}%, PnL ≥ {MIN_PNL_SOL} SOL")
     logger.info("=" * 60)
 
     logger.info("📊 Шаг 1: Получаю свежие pump.fun токены...")
@@ -263,7 +272,7 @@ def _discover_impl():
         logger.info(f"    {c['wallet']} — role={c['role']}, токенов={c['count']}")
 
     logger.info("")
-    logger.info("🧠 Шаг 3: Проверяю через Smart Money (win rate ≥ 50%)...")
+    logger.info(f"🧠 Шаг 3: Проверяю через Smart Money...")
     valid = []
     for i, cand in enumerate(candidates[:MAX_VALIDATE]):
         wallet = cand["wallet"]
@@ -274,7 +283,7 @@ def _discover_impl():
             info["role"] = cand["role"]
             info["tokens_bought"] = cand["tokens"]
             valid.append(info)
-            logger.info(f"    ✅ ПОДХОДИТ! win={info['win_rate']}, pnl={info['pnl_sol']}")
+            logger.info(f"    ✅ ПОДХОДИТ! win={info['win_rate']}%, pnl={info['pnl_sol']} SOL")
         time.sleep(0.5)
 
     logger.info("")
