@@ -78,11 +78,7 @@ def get_fresh_pumpfun_tokens(limit: int = TOP_TOKENS_LIMIT):
 
 
 def get_token_traders(token_mint: str, limit: int = 30):
-    """
-    Возвращает покупателей и продавцов через OWNER-адреса.
-    Это ВАЖНО: в Solana есть Token Accounts (хранилища токенов) и Owners (кошельки).
-    Нам нужны Owners — у них есть история транзакций.
-    """
+    """Возвращает покупателей и продавцов через OWNER-адреса."""
     payload = {
         "jsonrpc": "2.0", "id": 1,
         "method": "getSignaturesForAddress",
@@ -120,7 +116,6 @@ def get_token_traders(token_mint: str, limit: int = 30):
                 post_balances = meta.get("postTokenBalances", [])
                 pre_balances = meta.get("preTokenBalances", [])
 
-                # КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: берём OWNER, а не account_index
                 pre_map = {}
                 for b in pre_balances:
                     owner = b.get("owner")
@@ -199,24 +194,31 @@ def validate_candidate(wallet: str):
         open_pos = stats.get("open_positions", 0)
         buys = stats.get("buys", 0)
         sells = stats.get("sells", 0)
+        swaps_recent = stats.get("swaps_recent", 0)
 
         total_trades = buys + sells
         trades_per_day = total_trades / 3 if total_trades else 0
 
+        # Логируем полную статистику кандидата
+        logger.info(
+            f"    📊 {wallet}: swaps={swaps_recent}, buys={buys}, sells={sells}, "
+            f"closed={closed}, open={open_pos}, win={win_rate}, pnl={pnl}"
+        )
+
         if trades_per_day > MAX_TRADES_PER_DAY:
-            logger.info(f"    ⏭️  {wallet[:8]}... — бот ({trades_per_day:.0f}/день)")
+            logger.info(f"    ⏭️  {wallet} — бот ({trades_per_day:.0f}/день)")
             return None
 
         if not closed and not open_pos and buys == 0 and sells == 0:
-            logger.info(f"    ⏭️  {wallet[:8]}... — нет активности")
+            logger.info(f"    ⏭️  {wallet} — нет активности")
             return None
 
         if closed and win_rate is not None and win_rate < MIN_WIN_RATE:
-            logger.info(f"    ⏭️  {wallet[:8]}... — win {win_rate:.0f}% < {MIN_WIN_RATE}%")
+            logger.info(f"    ⏭️  {wallet} — win {win_rate:.0f}% < {MIN_WIN_RATE}%")
             return None
 
         if closed and pnl is not None and pnl < 0:
-            logger.info(f"    ⏭️  {wallet[:8]}... — PnL {pnl:.4f} < 0")
+            logger.info(f"    ⏭️  {wallet} — PnL {pnl:.4f} < 0")
             return None
 
         return {
@@ -226,7 +228,7 @@ def validate_candidate(wallet: str):
             "trades_per_day": round(trades_per_day, 1),
         }
     except Exception as e:
-        logger.error(f"Ошибка валидации {wallet[:8]}: {e}")
+        logger.error(f"Ошибка валидации {wallet}: {e}")
         return None
 
 
@@ -256,16 +258,16 @@ def _discover_impl():
         return {"error": "Не найдено активных кандидатов"}
 
     logger.info("")
-    logger.info(f"  Найдено {len(candidates)} кандидатов")
-    for c in candidates[:10]:
-        logger.info(f"    {c['wallet'][:8]}... — role={c['role']}, токенов={c['count']}")
+    logger.info(f"  Найдено {len(candidates)} кандидатов:")
+    for c in candidates[:30]:
+        logger.info(f"    {c['wallet']} — role={c['role']}, токенов={c['count']}")
 
     logger.info("")
     logger.info("🧠 Шаг 3: Проверяю через Smart Money (win rate ≥ 50%)...")
     valid = []
     for i, cand in enumerate(candidates[:MAX_VALIDATE]):
         wallet = cand["wallet"]
-        logger.info(f"  [{i+1}/{min(len(candidates), MAX_VALIDATE)}] {wallet[:8]}...")
+        logger.info(f"  [{i+1}/{min(len(candidates), MAX_VALIDATE)}] {wallet}")
 
         info = validate_candidate(wallet)
         if info:

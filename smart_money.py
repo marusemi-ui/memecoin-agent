@@ -100,8 +100,7 @@ def get_sol_balance(address: str):
 
 def get_token_balances(address: str):
     payload = {
-        "jsonrpc": "2.0",
-        "id": 1,
+        "jsonrpc": "2.0", "id": 1,
         "method": "getTokenAccountsByOwner",
         "params": [
             address,
@@ -122,8 +121,7 @@ def get_token_balances(address: str):
             ui_amount = float(token_amount.get("uiAmount", 0) or 0)
             if ui_amount > 0:
                 balances.append({
-                    "mint": mint,
-                    "amount": ui_amount,
+                    "mint": mint, "amount": ui_amount,
                     "decimals": token_amount.get("decimals", 0),
                 })
         return balances
@@ -165,7 +163,7 @@ def summarize_portfolio(address: str):
 
 
 def fetch_transactions(address, limit=100, before=None):
-    """Загружает транзакции БЕЗ фильтра type=SWAP (чтобы ловить pump.fun)."""
+    """Без фильтра type=SWAP — чтобы ловить pump.fun транзакции."""
     url = BASE_URL.format(address=address)
     params = {"api-key": HELIUS_API_KEY, "limit": limit}
     if before:
@@ -196,7 +194,7 @@ def fetch_all_swaps(address, max_pages=3):
 
 
 def parse_swap(tx, wallet_address):
-    """Ищет SWAP-транзакции. Расширено для pump.fun."""
+    """Парсит SWAP/UNKNOWN/TRANSFER транзакции для pump.fun."""
     tx_type = tx.get("type", "")
     if tx_type not in ("SWAP", "UNKNOWN", "TRANSFER"):
         return None
@@ -354,7 +352,8 @@ def analyze_wallet(address):
         return {
             "verdict": "UNKNOWN",
             "reason": "Не удалось загрузить транзакции",
-            "stats": {},
+            "stats": {"swaps_recent": 0, "buys": 0, "sells": 0, "closed_with_sol": 0,
+                      "open_positions": 0, "win_rate": None, "total_pnl_sol": None},
             "portfolio": portfolio,
         }
 
@@ -405,6 +404,7 @@ def analyze_wallet(address):
         "verdict": verdict,
         "reason": reason,
         "stats": {
+            "swaps_recent": len(txs_recent),
             "buys": buys, "sells": sells,
             "closed_positions": len(closed),
             "closed_with_sol": len(closed_with_sol),
