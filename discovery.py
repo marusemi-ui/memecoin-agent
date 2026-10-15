@@ -1,9 +1,11 @@
 """
 Discovery — автопоиск умных кошельков.
-Источник: fallback-список мемкоинов (10 токенов).
+Источник: fallback-список мемкоинов.
+С валидацией Solana-адресов (отсеиваем PDA и временные аккаунты).
 """
 
 import os
+import re
 import time
 import logging
 import requests
@@ -26,7 +28,7 @@ SOL_MINT = "So11111111111111111111111111111111111111112"
 # НАСТРОЙКИ
 # ─────────────────────────────────────────────
 
-MIN_TOKEN_APPEARANCE = 2      # 2 — чтобы не отсеивать
+MIN_TOKEN_APPEARANCE = 2
 MIN_WIN_RATE = 45.0
 MIN_PNL_SOL = 5.0
 MAX_TRADES_PER_DAY = 200
@@ -35,7 +37,40 @@ MAX_VALIDATE = 5
 
 
 # ─────────────────────────────────────────────
-# Fallback: 10 актуальных мемкоинов
+# Валидация Solana-адресов
+# ─────────────────────────────────────────────
+
+BASE58_REGEX = re.compile(r'^[1-9A-HJ-NP-Za-km-z]{32,44}$')
+
+# Известные программы и системные адреса (отсеиваем)
+EXCLUDED_ADDRESSES = {
+    "11111111111111111111111111111111",  # System Program
+    "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",  # Token Program
+    "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",  # Token-2022
+    "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL",  # ATA
+    "ComputeBudget111111111111111111111111111111",  # Compute Budget
+    "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4",  # Jupiter
+    "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P",  # Pump.fun
+}
+
+
+def is_valid_solana_address(addr: str) -> bool:
+    """Проверяет, что адрес похож на реальный Solana-кошелёк."""
+    if not addr or not isinstance(addr, str):
+        return False
+    if len(addr) < 32 or len(addr) > 44:
+        return False
+    if not BASE58_REGEX.match(addr):
+        return False
+    if addr in EXCLUDED_ADDRESSES:
+        return False
+    if addr == SOL_MINT:
+        return False
+    return True
+
+
+# ─────────────────────────────────────────────
+# Fallback: 10 мемкоинов
 # ─────────────────────────────────────────────
 
 FALLBACK_TOKENS = [
@@ -53,7 +88,7 @@ FALLBACK_TOKENS = [
 
 
 def get_tokens():
-    """Возвращает fallback-список (10 мемкоинов)."""
+    """Возвращает fallback-список."""
     logger.info(f"  Использую fallback: {len(FALLBACK_TOKENS)} токенов")
     for t in FALLBACK_TOKENS:
         logger.info(f"    - {t['symbol']}: {t['mint'][:12]}...")
@@ -65,7 +100,7 @@ def get_tokens():
 # ─────────────────────────────────────────────
 
 def get_token_traders(token_mint: str, limit: int = 20):
-    """Покупатели и продавцы через OWNER-адреса."""
+    """Покупатели и продавцы через OWNER-адреса (с валидацией)."""
     payload = {
         "jsonrpc": "2.0", "id": 1,
         "method": "getSignaturesForAddress",
@@ -81,6 +116,7 @@ def get_token_traders(token_mint: str, limit: int = 20):
 
         buyers = set()
         sellers = set()
+        invalid_count = 0
 
         for sig_info in signatures[:10]:
             sig = sig_info.get("signature")
@@ -116,6 +152,11 @@ def get_token_traders(token_mint: str, limit: int = 20):
                         post_map[owner] = float(b.get("uiTokenAmount", {}).get("uiAmount") or 0)
 
                 for owner in post_map:
+                    # ВАЛИДАЦИЯ адреса
+                    if not is_valid_solana_address(owner):
+                        invalid_count += 1
+                        continue
+
                     pre_amt = pre_map.get(owner, 0)
                     post_amt = post_map[owner]
                     if post_amt > pre_amt:
@@ -128,6 +169,9 @@ def get_token_traders(token_mint: str, limit: int = 20):
                 continue
 
             time.sleep(0.05)
+
+        if invalid_count > 0:
+            logger.info(f"    ⚠️  отсеяно невалидных адресов: {invalid_count}")
 
         return list(buyers), list(sellers)
 
