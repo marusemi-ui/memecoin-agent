@@ -1,7 +1,7 @@
 """
 Discovery — автопоиск умных кошельков.
 Источник: fallback-список мемкоинов.
-С проверкой адресов через Helius API (отсеиваем PDA).
+С валидацией адресов через Helius (отсеиваем PDA + пустые).
 """
 
 import os
@@ -53,7 +53,6 @@ EXCLUDED_ADDRESSES = {
     "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P",
 }
 
-# Кеш проверок через Helius
 _validated_addresses = {}
 
 
@@ -74,28 +73,43 @@ def is_valid_format(addr: str) -> bool:
 
 def is_helius_valid_address(addr: str) -> bool:
     """
-    Проверяет, что Helius видит этот адрес как реальный кошелёк.
-    Использует кеш, чтобы не тратить кредиты.
+    Проверяет, что Helius видит адрес И у него есть транзакции.
+    Отсеивает PDA (пустой ответ) и invalid (dict с error).
     """
     if addr in _validated_addresses:
         return _validated_addresses[addr]
 
     url = HELIUS_TX_API.format(address=addr)
-    params = {"api-key": HELIUS_API_KEY, "limit": 1}
+    params = {"api-key": HELIUS_API_KEY, "limit": 5}
     try:
         r = requests.get(url, params=params, timeout=10)
-        if r.status_code == 200:
-            try:
-                data = r.json()
-                if isinstance(data, list):
-                    _validated_addresses[addr] = True
-                    return True
-            except Exception:
-                pass
-        # 400 = invalid address, 404 = not found
+        
+        try:
+            data = r.json()
+        except Exception:
+            _validated_addresses[addr] = False
+            return False
+        
+        # Helius вернул ошибку
+        if isinstance(data, dict):
+            err = data.get("error", "unknown")
+            logger.debug(f"    Helius error для {addr[:12]}: {err}")
+            _validated_addresses[addr] = False
+            return False
+        
+        # Список — проверяем, есть ли транзакции
+        if isinstance(data, list):
+            if len(data) == 0:
+                logger.debug(f"    Пустой ответ для {addr[:12]}")
+                _validated_addresses[addr] = False
+                return False
+            _validated_addresses[addr] = True
+            return True
+        
         _validated_addresses[addr] = False
         return False
-    except Exception:
+    except Exception as e:
+        logger.debug(f"    Ошибка проверки {addr[:12]}: {e}")
         _validated_addresses[addr] = False
         return False
 
@@ -236,7 +250,7 @@ def find_candidates(tokens: list, min_appearance: int = 2):
 
     logger.info(f"  Всего кандидатов (формат ок): {len(active)}")
 
-    # Проверяем через Helius API (отсеиваем PDA)
+    # Проверяем через Helius API (отсеиваем PDA и пустые)
     valid_active = []
     checked = 0
     for c in active:
@@ -245,7 +259,7 @@ def find_candidates(tokens: list, min_appearance: int = 2):
             valid_active.append(c)
             logger.info(f"    ✅ {c['wallet'][:16]}... — валидный")
         else:
-            logger.info(f"    ⏭️  {c['wallet'][:16]}... — PDA/invalid")
+            logger.info(f"    ⏭️  {c['wallet'][:16]}... — PDA/пустой")
         if len(valid_active) >= MAX_CANDIDATES:
             break
 
@@ -331,10 +345,10 @@ def _discover_impl():
     candidates = find_candidates(tokens, min_appearance=MIN_TOKEN_APPEARANCE)
 
     if not candidates:
-        return {"error": "Не найдено активных кандидатов (все PDA)"}
+        return {"error": "Не найдено активных кандидатов (все PDA/пустые)"}
 
     logger.info("")
-    logger.info(f"  Найдено {len(candidates)} валидных кандидатов:")
+    logger.info(f"  Найдено {len(candidates)} валидных кандидатов")
     for c in candidates[:15]:
         logger.info(f"    {c['wallet']} — role={c['role']}, токенов={c['count']}")
 
