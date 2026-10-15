@@ -33,7 +33,7 @@ MIN_WIN_RATE = 45.0
 MIN_PNL_SOL = 5.0
 MAX_TRADES_PER_DAY = 200
 MAX_CANDIDATES = 15
-MAX_VALIDATE = 1
+MAX_VALIDATE = 3
 
 # Кеш DexScreener (1 час)
 _tokens_cache = {"data": None, "expires_at": 0}
@@ -60,9 +60,8 @@ FALLBACK_TOKENS = [
 def get_trending_tokens(limit: int = TOP_TOKENS_LIMIT):
     global _tokens_cache
 
-    # Проверяем кеш
     if _tokens_cache["data"] and time.time() < _tokens_cache["expires_at"]:
-        logger.info(f"  Использую кеш DexScreener ({len(_tokens_cache['data'])} токенов)")
+        logger.info(f"  Кеш DexScreener ({len(_tokens_cache['data'])} токенов)")
         return _tokens_cache["data"][:limit]
 
     url = "https://api.dexscreener.com/token-boosts/top/v1"
@@ -88,9 +87,8 @@ def get_trending_tokens(limit: int = TOP_TOKENS_LIMIT):
     except Exception as e:
         logger.error(f"  Ошибка DexScreener: {e}")
 
-    # Используем старый кеш, если API упал
     if _tokens_cache["data"]:
-        logger.warning("  Использую старый кеш (API упал)")
+        logger.warning("  Старый кеш (API упал)")
         return _tokens_cache["data"][:limit]
 
     return []
@@ -103,7 +101,7 @@ def get_tokens():
             logger.info(f"    - BOOSTED: {t['mint'][:12]}...")
         return tokens
 
-    logger.info(f"  Fallback: использую {len(FALLBACK_TOKENS)} токенов")
+    logger.info(f"  Fallback: {len(FALLBACK_TOKENS)} токенов")
     for t in FALLBACK_TOKENS:
         logger.info(f"    - {t['symbol']}: {t['mint'][:12]}...")
     return list(FALLBACK_TOKENS)
@@ -279,7 +277,9 @@ def find_candidates(tokens: list, min_appearance: int = 2):
         for w, data in wallet_data.items()
         if data["count"] >= min_appearance
     ]
-    active.sort(key=lambda x: (role_priority.get(x["role"], 99), -x["count"]))
+
+    # ГЛАВНОЕ ИЗМЕНЕНИЕ: сортируем по count ПЕРВЫМ, потом role
+    active.sort(key=lambda x: (-x["count"], role_priority.get(x["role"], 99)))
 
     valid_active = []
     for c in active:
@@ -292,12 +292,11 @@ def find_candidates(tokens: list, min_appearance: int = 2):
 
 
 # ─────────────────────────────────────────────
-# Валидация через Smart Money (БЕЗ ПОРТФЕЛЯ!)
+# Валидация через Smart Money
 # ─────────────────────────────────────────────
 
 def validate_candidate(wallet: str, min_win_rate: float, min_pnl_sol: float, max_trades_per_day: int):
     try:
-        # ВАЖНО: include_portfolio=False экономит память!
         result = analyze_wallet(wallet, include_portfolio=False)
         stats = result.get("stats", {}) or {}
         win_rate = stats.get("win_rate")
@@ -310,13 +309,26 @@ def validate_candidate(wallet: str, min_win_rate: float, min_pnl_sol: float, max
         total_trades = buys + sells
         trades_per_day = total_trades / 3 if total_trades else 0
 
+        logger.info(
+            f"    📊 {wallet[:16]}: buys={buys}, sells={sells}, "
+            f"closed={closed}, open={open_pos}, win={win_rate}, pnl={pnl}"
+        )
+
         if trades_per_day > max_trades_per_day:
+            logger.info(f"    ⏭️  бот ({trades_per_day:.0f}/день)")
             return None
+
+        # ОСЛАБИЛИ: принимаем с открытыми позициями
         if not closed and not open_pos and buys == 0 and sells == 0:
+            logger.info(f"    ⏭️  нет активности")
             return None
+
         if closed and win_rate is not None and win_rate < min_win_rate:
+            logger.info(f"    ⏭️  win {win_rate:.0f}% < {min_win_rate}%")
             return None
+
         if closed and pnl is not None and pnl < min_pnl_sol:
+            logger.info(f"    ⏭️  PnL {pnl:.4f} < {min_pnl_sol}")
             return None
 
         return {
@@ -375,7 +387,8 @@ def _discover_impl():
             info["role"] = cand["role"]
             info["tokens_bought"] = cand["tokens"]
             valid.append(info)
-            logger.info(f"    ✅ ПОДХОДИТ! win={info['win_rate']}%, pnl={info['pnl_sol']} SOL")
+            logger.info(f"    ✅ ПОДХОДИТ! win={info['win_rate']}, pnl={info['pnl_sol']}")
+        time.sleep(0.3)
 
     logger.info("")
     logger.info(f"✅ Найдено {len(valid)} валидных кошельков")

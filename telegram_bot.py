@@ -209,12 +209,14 @@ async def cmd_discover(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for i, w in enumerate(valid, 1):
             win = f"{w['win_rate']:.0f}%" if w['win_rate'] is not None else "—"
             pnl = f"{w['pnl_sol']:+.4f}" if w['pnl_sol'] is not None else "—"
-            text += (
-                f"{i}. `{w['wallet']}`\n"
-                f"   Win: {win}, PnL: {pnl} SOL\n"
-                f"   Роль: {w.get('role', '?')}\n"
-                f"   Сделок/день: {w.get('trades_per_day', '—')}\n\n"
-            )
+        text += (
+            f"{i}. `{w['wallet']}`\n"
+            f"   Win: {win}, PnL: {pnl} SOL\n"
+            f"   Роль: {w.get('role', '?')}\n"
+            f"   Сделок/день: {w.get('trades_per_day', '—')}\n"
+            f"   Закрытых: {w.get('closed', 0)}, Открытых: {w.get('open_positions', 0)}\n"
+            f"   Покупок: {w.get('buys', 0)}, Продаж: {w.get('sells', 0)}\n\n"
+        )
         text += "💡 /watch <wallet> — добавить"
         await msg.edit_text(text, parse_mode="Markdown")
     except Exception as e:
