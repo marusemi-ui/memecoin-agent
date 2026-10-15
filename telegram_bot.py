@@ -237,7 +237,8 @@ async def cmd_discover(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"   Закрытых: {w.get('closed', 0)}, Открытых: {w.get('open_positions', 0)}\n"
                 f"   Покупок: {w.get('buys', 0)}, Продаж: {w.get('sells', 0)}\n\n"
             )
-        text += "💡 /watch <wallet> — добавить"
+        # ИСПРАВЛЕНО: без угловых скобок в <wallet>
+        text += "💡 /watch WALLET — добавить"
 
         logger.info(f"📤 Длина сообщения: {len(text)} символов")
 
