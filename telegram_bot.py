@@ -59,6 +59,23 @@ def fmt_amount(v):
     except (TypeError, ValueError): return "—"
 
 
+async def safe_edit(msg, text):
+    """Безопасная отправка — с HTML, потом без, потом лог."""
+    try:
+        await msg.edit_text(text, parse_mode="HTML")
+        logger.info(f"✅ Отправлено с HTML ({len(text)} символов)")
+        return True
+    except Exception as e:
+        logger.error(f"❌ HTML не сработал: {e}")
+        try:
+            await msg.edit_text(text)
+            logger.info(f"✅ Отправлено без форматирования ({len(text)} символов)")
+            return True
+        except Exception as e2:
+            logger.error(f"❌ Отправка не удалась: {e2}")
+            return False
+
+
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 Привет! Я агент для анализа мемкоинов.\n\n"
@@ -67,7 +84,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/watch <wallet>\n"
         "/unwatch <wallet>\n"
         "/list\n"
-        "/discover — найти умные кошельки (win ≥ 45%, PnL ≥ 5 SOL)\n"
+        "/discover — найти умные кошельки\n"
         "/help"
     )
 
@@ -75,11 +92,11 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "📖 Команды:\n\n"
-        "/check <token> <wallet> — проверить токен\n"
-        "/watch <wallet> — добавить в мониторинг\n"
+        "🔍 /check <token> <wallet> — проверить токен\n"
+        "👁️ /watch <wallet> — добавить в мониторинг\n"
         "/unwatch <wallet> — удалить\n"
         "/list — показать список\n"
-        "/discover — автопоиск (win ≥ 45%, PnL ≥ 5 SOL)"
+        "🎯 /discover — автопоиск умных кошельков"
     )
 
 
@@ -129,7 +146,7 @@ async def cmd_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 for t in tokens[:5]:
                     name = t.get("name") or t.get("mint", "")[:8]
                     text += f"├ {name} — {fmt_amount(t.get('amount', 0))} tok ({fmt_usd(t.get('value_usd', 0))})\n"
-        await msg.edit_text(text)
+        await safe_edit(msg, text)
     except Exception as e:
         logger.exception("Ошибка /check")
         await msg.edit_text(f"❌ Ошибка: {e}")
@@ -173,7 +190,7 @@ async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_discover(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text(
         "🔍 Автопоиск...\n\n"
-        "pump.fun + Smart Money\n"
+        "Ищу трейдеров в свежих pump.fun токенах.\n"
         "Фильтр: win rate ≥ 45%, PnL ≥ 5 SOL\n\n"
         "1-2 минуты."
     )
@@ -191,6 +208,8 @@ async def cmd_discover(update: Update, context: ContextTypes.DEFAULT_TYPE):
         tokens_checked = result.get("tokens_checked", 0)
         candidates_found = result.get("candidates_found", 0)
 
+        logger.info(f"📤 Формирую сообщение: {len(valid)} кошельков")
+
         if not valid:
             await msg.edit_text(
                 f"😔 Не найдено.\n\n"
@@ -201,27 +220,35 @@ async def cmd_discover(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
+        # HTML вместо Markdown
         text = (
-            f"🎯 Найдено {len(valid)} кошельков:\n"
+            f"🎯 <b>Найдено {len(valid)} кошельков:</b>\n"
             f"(win ≥ {MIN_WIN_RATE}%, PnL ≥ {MIN_PNL_SOL} SOL)\n"
             f"Проверено {tokens_checked} токенов, {candidates_found} кандидатов\n\n"
         )
         for i, w in enumerate(valid, 1):
             win = f"{w['win_rate']:.0f}%" if w['win_rate'] is not None else "—"
             pnl = f"{w['pnl_sol']:+.4f}" if w['pnl_sol'] is not None else "—"
-        text += (
-            f"{i}. `{w['wallet']}`\n"
-            f"   Win: {win}, PnL: {pnl} SOL\n"
-            f"   Роль: {w.get('role', '?')}\n"
-            f"   Сделок/день: {w.get('trades_per_day', '—')}\n"
-            f"   Закрытых: {w.get('closed', 0)}, Открытых: {w.get('open_positions', 0)}\n"
-            f"   Покупок: {w.get('buys', 0)}, Продаж: {w.get('sells', 0)}\n\n"
-        )
+            text += (
+                f"<b>{i}.</b> <code>{w['wallet']}</code>\n"
+                f"   Win: {win}, PnL: {pnl} SOL\n"
+                f"   Роль: {w.get('role', '?')}\n"
+                f"   Сделок/день: {w.get('trades_per_day', '—')}\n"
+                f"   Закрытых: {w.get('closed', 0)}, Открытых: {w.get('open_positions', 0)}\n"
+                f"   Покупок: {w.get('buys', 0)}, Продаж: {w.get('sells', 0)}\n\n"
+            )
         text += "💡 /watch <wallet> — добавить"
-        await msg.edit_text(text, parse_mode="Markdown")
+
+        logger.info(f"📤 Длина сообщения: {len(text)} символов")
+
+        await safe_edit(msg, text)
+
     except Exception as e:
         logger.exception("Ошибка /discover")
-        await msg.edit_text(f"❌ Ошибка: {e}")
+        try:
+            await msg.edit_text(f"❌ Ошибка: {e}")
+        except Exception as e2:
+            logger.error(f"Не удалось даже показать ошибку: {e2}")
 
 
 def main():
