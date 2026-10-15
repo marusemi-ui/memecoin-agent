@@ -17,11 +17,10 @@ HELIUS_API_KEY = os.getenv("HELIUS_API_KEY")
 if not HELIUS_API_KEY:
     raise ValueError("Нет HELIUS_API_KEY в .env файле!")
 
-BASE_URL = "https://api.helius.xyz/v0/addresses/{address}/transactions"
 RPC_URL = f"https://mainnet.helius-rpc.com/?api-key={HELIUS_API_KEY}"
 SOL_MINT = "So11111111111111111111111111111111111111112"
 
-# Уменьшили лимит для экономии памяти
+# Сколько последних транзакций загружать
 TX_LIMIT = 30
 
 _token_names = {}
@@ -182,35 +181,79 @@ def summarize_portfolio(address: str):
 
 
 # ─────────────────────────────────────────────
-# Транзакции (limit=30 для экономии)
+# Транзакции через ОБЫЧНЫЙ RPC
 # ─────────────────────────────────────────────
 
-def fetch_transactions(address, limit=TX_LIMIT, before=None):
-    url = BASE_URL.format(address=address)
-    params = {"api-key": HELIUS_API_KEY, "limit": limit}
-    if before:
-        params["before"] = before
+def fetch_signatures(address: str, limit: int = TX_LIMIT):
+    """Получает подписи последних транзакций кошелька."""
+    payload = {
+        "jsonrpc": "2.0", "id": 1,
+        "method": "getSignaturesForAddress",
+        "params": [address, {"limit": limit}],
+    }
     try:
-        response = requests.get(url, params=params, timeout=30)
-        response.raise_for_status()
-        return response.json()
+        r = requests.post(RPC_URL, json=payload, timeout=20)
+        r.raise_for_status()
+        data = r.json()
+        return data.get("result", [])
     except Exception as e:
-        logger.warning(f"Ошибка запроса транзакций: {e}")
+        logger.warning(f"Ошибка getSignaturesForAddress: {e}")
         return []
 
 
-def fetch_all_txs(address, max_pages=1):
+def fetch_transaction_detail(sig: str):
+    """Загружает одну транзакцию через обычный RPC."""
+    payload = {
+        "jsonrpc": "2.0", "id": 1,
+        "method": "getTransaction",
+        "params": [sig, {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0}],
+    }
+    try:
+        r = requests.post(RPC_URL, json=payload, timeout=15)
+        r.raise_for_status()
+        data = r.json()
+        return data.get("result")
+    except Exception as e:
+        logger.debug(f"Ошибка getTransaction {sig[:8]}: {e}")
+        return None
+
+
+def fetch_all_txs(address: str, max_pages: int = 1):
+    """
+    Загружает транзакции через обычный RPC.
+    Обходит ограничение Enhanced API (пустые pre/postTokenBalances).
+    """
+    sigs = fetch_signatures(address, limit=TX_LIMIT)
+    if not sigs:
+        return []
+
     all_txs = []
-    before = None
-    for page in range(max_pages):
-        txs = fetch_transactions(address, limit=TX_LIMIT, before=before)
-        if not txs:
-            break
-        all_txs.extend(txs)
-        if len(txs) < TX_LIMIT:
-            break
-        before = txs[-1]["signature"]
-        time.sleep(0.2)
+    for sig_info in sigs[:TX_LIMIT]:
+        sig = sig_info.get("signature")
+        if not sig:
+            continue
+
+        tx = fetch_transaction_detail(sig)
+        if not tx:
+            continue
+
+        # Добавляем timestamp из sig_info
+        tx["timestamp"] = sig_info.get("blockTime") or 0
+
+        # Добавляем тип (не используется парсером, но полезно для отладки)
+        tx_type = tx.get("type", "UNKNOWN")
+        if "meta" in tx and tx.get("meta"):
+            # Определяем тип по наличию pre/post balances
+            pre = len(tx["meta"].get("preTokenBalances", []))
+            post = len(tx["meta"].get("postTokenBalances", []))
+            if pre > 0 or post > 0:
+                tx["type"] = "SWAP"
+            else:
+                tx["type"] = "TRANSFER"
+
+        all_txs.append(tx)
+        time.sleep(0.05)
+
     return all_txs
 
 
@@ -259,7 +302,7 @@ def parse_swap_balances(tx, wallet_address):
     # SOL change
     sol_change = 0.0
     try:
-        account_keys = tx.get("accountKeys", [])
+        account_keys = tx.get("transaction", {}).get("message", {}).get("accountKeys", [])
         pre_sol = meta.get("preBalances", [])
         post_sol = meta.get("postBalances", [])
         for i, key in enumerate(account_keys):
@@ -290,7 +333,7 @@ def parse_swap_balances(tx, wallet_address):
 
     significant_changes.sort(key=lambda x: abs(x["delta"]), reverse=True)
     main = significant_changes[0]
-    timestamp = tx.get("timestamp")
+    timestamp = tx.get("timestamp") or tx.get("blockTime") or 0
 
     if main["delta"] > 0:
         sol_spent = abs(sol_change) if sol_change < 0 else 0
@@ -312,7 +355,7 @@ def parse_swap_balances(tx, wallet_address):
 
 
 def analyze_pnl(txs, wallet_address):
-    sorted_txs = sorted(txs, key=lambda t: t.get("timestamp", 0))
+    sorted_txs = sorted(txs, key=lambda t: t.get("timestamp", 0) or t.get("blockTime", 0) or 0)
     positions = {}
     closed = []
     buys_count = 0
@@ -377,12 +420,12 @@ def analyze_pnl(txs, wallet_address):
 # ─────────────────────────────────────────────
 
 def analyze_wallet(address):
-    logger.info(f"🔍 Анализ кошелька: {address[:16]}...")
+    logger.info(f"🔍 Анализ: {address[:16]}...")
 
     portfolio = summarize_portfolio(address)
 
     txs = fetch_all_txs(address, max_pages=1)
-    logger.info(f"  📥 Helius вернул {len(txs)} транзакций")
+    logger.info(f"  📥 Загружено {len(txs)} транзакций через RPC")
 
     if not txs:
         return {
@@ -402,7 +445,7 @@ def analyze_wallet(address):
         logger.info(f"  TX#{i+1}: type={tx_type}, preBal={pre_count}, postBal={post_count}")
 
     now = time.time()
-    txs_recent = [t for t in txs if t.get("timestamp", 0) > now - 3 * 86400]
+    txs_recent = [t for t in txs if (t.get("timestamp", 0) or t.get("blockTime", 0) or 0) > now - 3 * 86400]
     swaps_recent_count = len(txs_recent)
     logger.info(f"  📅 За 3 дня: {swaps_recent_count}")
 
