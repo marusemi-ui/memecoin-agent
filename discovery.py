@@ -34,7 +34,7 @@ MIN_WIN_RATE = 45.0
 MIN_PNL_SOL = 5.0
 MAX_TRADES_PER_DAY = 200
 MAX_CANDIDATES = 15
-MAX_VALIDATE = 5
+MAX_VALIDATE = 2
 
 
 # ─────────────────────────────────────────────

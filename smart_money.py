@@ -1,9 +1,17 @@
 import os
 import time
+import logging
 import requests
 from dotenv import load_dotenv
 
 load_dotenv()
+
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO,
+)
+logger = logging.getLogger(__name__)
+
 HELIUS_API_KEY = os.getenv("HELIUS_API_KEY")
 
 if not HELIUS_API_KEY:
@@ -13,10 +21,17 @@ BASE_URL = "https://api.helius.xyz/v0/addresses/{address}/transactions"
 RPC_URL = f"https://mainnet.helius-rpc.com/?api-key={HELIUS_API_KEY}"
 SOL_MINT = "So11111111111111111111111111111111111111112"
 
+# Уменьшили лимит для экономии памяти
+TX_LIMIT = 30
+
 _token_names = {}
 _token_prices = {}
 _sol_price_usd = None
 
+
+# ─────────────────────────────────────────────
+# Имена и цены
+# ─────────────────────────────────────────────
 
 def get_token_name(mint: str):
     if mint in _token_names:
@@ -85,6 +100,10 @@ def get_token_price_usd(mint: str):
         return None
 
 
+# ─────────────────────────────────────────────
+# Балансы
+# ─────────────────────────────────────────────
+
 def get_sol_balance(address: str):
     payload = {"jsonrpc": "2.0", "id": 1, "method": "getBalance", "params": [address]}
     try:
@@ -94,7 +113,7 @@ def get_sol_balance(address: str):
         lamports = data.get("result", {}).get("value", 0)
         return lamports / 1_000_000_000
     except Exception as e:
-        print(f"⚠️  Не удалось получить SOL-баланс: {e}")
+        logger.warning(f"Не удалось получить SOL-баланс: {e}")
         return 0
 
 
@@ -126,7 +145,7 @@ def get_token_balances(address: str):
                 })
         return balances
     except Exception as e:
-        print(f"⚠️  Не удалось получить токен-балансы: {e}")
+        logger.warning(f"Не удалось получить токен-балансы: {e}")
         return []
 
 
@@ -162,7 +181,11 @@ def summarize_portfolio(address: str):
     }
 
 
-def fetch_transactions(address, limit=100, before=None):
+# ─────────────────────────────────────────────
+# Транзакции (limit=30 для экономии)
+# ─────────────────────────────────────────────
+
+def fetch_transactions(address, limit=TX_LIMIT, before=None):
     url = BASE_URL.format(address=address)
     params = {"api-key": HELIUS_API_KEY, "limit": limit}
     if before:
@@ -172,26 +195,28 @@ def fetch_transactions(address, limit=100, before=None):
         response.raise_for_status()
         return response.json()
     except Exception as e:
-        print(f"⚠️  Ошибка запроса: {e}")
+        logger.warning(f"Ошибка запроса транзакций: {e}")
         return []
 
 
 def fetch_all_txs(address, max_pages=1):
-    """max_pages=1 — экономия памяти."""
     all_txs = []
     before = None
     for page in range(max_pages):
-        txs = fetch_transactions(address, limit=100, before=before)
+        txs = fetch_transactions(address, limit=TX_LIMIT, before=before)
         if not txs:
             break
         all_txs.extend(txs)
-        print(f"📥 Страница {page + 1}: +{len(txs)} транзакций (всего {len(all_txs)})")
-        if len(txs) < 100:
+        if len(txs) < TX_LIMIT:
             break
         before = txs[-1]["signature"]
         time.sleep(0.2)
     return all_txs
 
+
+# ─────────────────────────────────────────────
+# Парсер через балансы
+# ─────────────────────────────────────────────
 
 def parse_swap_balances(tx, wallet_address):
     """BUY/SELL через ИЗМЕНЕНИЕ БАЛАНСОВ."""
@@ -347,12 +372,18 @@ def analyze_pnl(txs, wallet_address):
     return closed, positions, buys_count, sells_count
 
 
+# ─────────────────────────────────────────────
+# Анализ кошелька
+# ─────────────────────────────────────────────
+
 def analyze_wallet(address):
-    print(f"\n🔍 Анализируем кошелёк: {address}\n")
+    logger.info(f"🔍 Анализ кошелька: {address[:16]}...")
 
     portfolio = summarize_portfolio(address)
 
     txs = fetch_all_txs(address, max_pages=1)
+    logger.info(f"  📥 Helius вернул {len(txs)} транзакций")
+
     if not txs:
         return {
             "verdict": "UNKNOWN",
@@ -362,23 +393,25 @@ def analyze_wallet(address):
             "portfolio": portfolio,
         }
 
-    print(f"\n📊 Всего транзакций: {len(txs)}")
+    # Показываем типы первых 3 транзакций
+    for i, tx in enumerate(txs[:3]):
+        tx_type = tx.get("type", "?")
+        meta = tx.get("meta", {})
+        pre_count = len(meta.get("preTokenBalances", []))
+        post_count = len(meta.get("postTokenBalances", []))
+        logger.info(f"  TX#{i+1}: type={tx_type}, preBal={pre_count}, postBal={post_count}")
 
     now = time.time()
     txs_recent = [t for t in txs if t.get("timestamp", 0) > now - 3 * 86400]
     swaps_recent_count = len(txs_recent)
-    print(f"📅 За 3 дня: {swaps_recent_count}")
+    logger.info(f"  📅 За 3 дня: {swaps_recent_count}")
 
     closed, open_positions, buys, sells = analyze_pnl(txs_recent, address)
 
-    # Освобождаем память
     del txs
     del txs_recent
 
-    print(f"\n🛒 Покупок: {buys}")
-    print(f"💸 Продаж: {sells}")
-    print(f"📈 Закрытых: {len(closed)}")
-    print(f"📦 Открытых: {len(open_positions)}")
+    logger.info(f"  🛒 Покупок: {buys}, Продаж: {sells}, Закрытых: {len(closed)}, Открытых: {len(open_positions)}")
 
     closed_with_sol = [p for p in closed if p["sol_spent"] > 0]
     total_pnl_sol = 0
