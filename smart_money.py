@@ -20,8 +20,8 @@ if not HELIUS_API_KEY:
 RPC_URL = f"https://mainnet.helius-rpc.com/?api-key={HELIUS_API_KEY}"
 SOL_MINT = "So11111111111111111111111111111111111111112"
 
-# Сколько последних транзакций загружать
-TX_LIMIT = 30
+# Уменьшили для экономии памяти
+TX_LIMIT = 15
 
 _token_names = {}
 _token_prices = {}
@@ -185,7 +185,6 @@ def summarize_portfolio(address: str):
 # ─────────────────────────────────────────────
 
 def fetch_signatures(address: str, limit: int = TX_LIMIT):
-    """Получает подписи последних транзакций кошелька."""
     payload = {
         "jsonrpc": "2.0", "id": 1,
         "method": "getSignaturesForAddress",
@@ -202,7 +201,6 @@ def fetch_signatures(address: str, limit: int = TX_LIMIT):
 
 
 def fetch_transaction_detail(sig: str):
-    """Загружает одну транзакцию через обычный RPC."""
     payload = {
         "jsonrpc": "2.0", "id": 1,
         "method": "getTransaction",
@@ -219,10 +217,6 @@ def fetch_transaction_detail(sig: str):
 
 
 def fetch_all_txs(address: str, max_pages: int = 1):
-    """
-    Загружает транзакции через обычный RPC.
-    Обходит ограничение Enhanced API (пустые pre/postTokenBalances).
-    """
     sigs = fetch_signatures(address, limit=TX_LIMIT)
     if not sigs:
         return []
@@ -237,19 +231,13 @@ def fetch_all_txs(address: str, max_pages: int = 1):
         if not tx:
             continue
 
-        # Добавляем timestamp из sig_info
         tx["timestamp"] = sig_info.get("blockTime") or 0
 
-        # Добавляем тип (не используется парсером, но полезно для отладки)
-        tx_type = tx.get("type", "UNKNOWN")
-        if "meta" in tx and tx.get("meta"):
-            # Определяем тип по наличию pre/post balances
+        # Определяем тип
+        if tx.get("meta"):
             pre = len(tx["meta"].get("preTokenBalances", []))
             post = len(tx["meta"].get("postTokenBalances", []))
-            if pre > 0 or post > 0:
-                tx["type"] = "SWAP"
-            else:
-                tx["type"] = "TRANSFER"
+            tx["type"] = "SWAP" if (pre > 0 or post > 0) else "TRANSFER"
 
         all_txs.append(tx)
         time.sleep(0.05)
@@ -262,7 +250,6 @@ def fetch_all_txs(address: str, max_pages: int = 1):
 # ─────────────────────────────────────────────
 
 def parse_swap_balances(tx, wallet_address):
-    """BUY/SELL через ИЗМЕНЕНИЕ БАЛАНСОВ."""
     meta = tx.get("meta", {})
     if not meta:
         return None
@@ -299,7 +286,6 @@ def parse_swap_balances(tx, wallet_address):
     if not changes:
         return None
 
-    # SOL change
     sol_change = 0.0
     try:
         account_keys = tx.get("transaction", {}).get("message", {}).get("accountKeys", [])
@@ -419,10 +405,13 @@ def analyze_pnl(txs, wallet_address):
 # Анализ кошелька
 # ─────────────────────────────────────────────
 
-def analyze_wallet(address):
+def analyze_wallet(address, include_portfolio=True):
+    """Анализ кошелька. include_portfolio=False экономит память."""
     logger.info(f"🔍 Анализ: {address[:16]}...")
 
-    portfolio = summarize_portfolio(address)
+    portfolio = None
+    if include_portfolio:
+        portfolio = summarize_portfolio(address)
 
     txs = fetch_all_txs(address, max_pages=1)
     logger.info(f"  📥 Загружено {len(txs)} транзакций через RPC")
@@ -436,7 +425,6 @@ def analyze_wallet(address):
             "portfolio": portfolio,
         }
 
-    # Показываем типы первых 3 транзакций
     for i, tx in enumerate(txs[:3]):
         tx_type = tx.get("type", "?")
         meta = tx.get("meta", {})

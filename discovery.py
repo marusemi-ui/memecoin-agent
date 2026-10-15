@@ -1,6 +1,6 @@
 """
 Discovery — автопоиск умных кошельков.
-Источник токенов: DexScreener Boosts (динамический топ) + fallback.
+Источник: DexScreener Boosts (с кешем на 1 час) + fallback.
 """
 
 import os
@@ -33,76 +33,76 @@ MIN_WIN_RATE = 45.0
 MIN_PNL_SOL = 5.0
 MAX_TRADES_PER_DAY = 200
 MAX_CANDIDATES = 15
-MAX_VALIDATE = 2
+MAX_VALIDATE = 1
 
-# Fallback на случай, если DexScreener не отвечает
+# Кеш DexScreener (1 час)
+_tokens_cache = {"data": None, "expires_at": 0}
+
+
 FALLBACK_TOKENS = [
     {"mint": "2qEHjDLDLbuBgRYvsxhc5D6uDWAivNFZGan56P1tpump", "symbol": "PNUT"},
     {"mint": "CzLSujWBLFsSjncfkh59rUFqvafWcYt5N2cqAy8Apump", "symbol": "WEN"},
     {"mint": "9BB6NFEcjBCtnNLFko2FqVQBq8HHM13kCyYcdQbgpump", "symbol": "FARTCOIN"},
     {"mint": "A8C3xuqscfmyLrte3VmTqrAq8kgMASius9AFNANwpump", "symbol": "FWOG"},
     {"mint": "MEW1gQWJ3nEXg2qgERiKu7FAFj79PHvQVREQUzScPP5", "symbol": "MEW"},
+    {"mint": "ukHH6c7mMyiWCf1b9pnWe25TSpkDDt3H5pQZgZ74J82", "symbol": "BOME"},
+    {"mint": "GJAFwWjJ3vnTsrQVabjBVK2TYB1YtRCQXRDfDgUnpump", "symbol": "MICHI"},
+    {"mint": "ED5nyyWEzpPPiWimP8vYm7sD7TD3LAt3Q3gRTWHzPJBY", "symbol": "MOODENG"},
+    {"mint": "7atgF8KQo4wJrD5ATGX7t1V2zVvykPJbFfNeVf1icFv1", "symbol": "MOTHER"},
+    {"mint": "HgcxVs6kJhPAaGqnPNGaa7zYgNT49hJrLufiqcNMuYZT", "symbol": "SPCX"},
 ]
 
 
 # ─────────────────────────────────────────────
-# Динамический список токенов
+# DexScreener с кешем
 # ─────────────────────────────────────────────
 
 def get_trending_tokens(limit: int = TOP_TOKENS_LIMIT):
-    """
-    Топ токенов по бустам в DexScreener (ближайшее к трендам).
-    """
+    global _tokens_cache
+
+    # Проверяем кеш
+    if _tokens_cache["data"] and time.time() < _tokens_cache["expires_at"]:
+        logger.info(f"  Использую кеш DexScreener ({len(_tokens_cache['data'])} токенов)")
+        return _tokens_cache["data"][:limit]
+
     url = "https://api.dexscreener.com/token-boosts/top/v1"
     try:
         r = requests.get(url, timeout=15)
         r.raise_for_status()
         data = r.json()
 
-        # Фильтруем только Solana
-        solana_tokens = [
-            item for item in data
-            if item.get("chainId") == "solana"
-        ]
-
-        # Сортируем по количеству бустов
-        solana_tokens.sort(
-            key=lambda x: int(x.get("amount", 0) or 0),
-            reverse=True,
-        )
+        solana_tokens = [item for item in data if item.get("chainId") == "solana"]
+        solana_tokens.sort(key=lambda x: int(x.get("amount", 0) or 0), reverse=True)
 
         tokens = []
         for item in solana_tokens[:limit]:
             mint = item.get("tokenAddress")
-            if not mint:
-                continue
-            tokens.append({
-                "mint": mint,
-                "symbol": "BOOSTED",
-                "volume_24h": 0,
-                "market_cap": 0,
-            })
+            if mint:
+                tokens.append({"mint": mint, "symbol": "BOOSTED", "volume_24h": 0, "market_cap": 0})
 
         if tokens:
-            logger.info(f"  DexScreener топ по бустам: {len(tokens)} токенов")
+            _tokens_cache["data"] = tokens
+            _tokens_cache["expires_at"] = time.time() + 3600
+            logger.info(f"  DexScreener (обновлено): {len(tokens)} токенов")
             return tokens
-        logger.warning("  DexScreener не вернул Solana-токенов")
     except Exception as e:
         logger.error(f"  Ошибка DexScreener: {e}")
+
+    # Используем старый кеш, если API упал
+    if _tokens_cache["data"]:
+        logger.warning("  Использую старый кеш (API упал)")
+        return _tokens_cache["data"][:limit]
 
     return []
 
 
 def get_tokens():
-    """Возвращает токены: сначала DexScreener, потом fallback."""
-    # ─── Попытка 1: DexScreener ───
     tokens = get_trending_tokens(limit=TOP_TOKENS_LIMIT)
     if tokens:
         for t in tokens:
             logger.info(f"    - BOOSTED: {t['mint'][:12]}...")
         return tokens
 
-    # ─── Попытка 2: fallback ───
     logger.info(f"  Fallback: использую {len(FALLBACK_TOKENS)} токенов")
     for t in FALLBACK_TOKENS:
         logger.info(f"    - {t['symbol']}: {t['mint'][:12]}...")
@@ -292,12 +292,13 @@ def find_candidates(tokens: list, min_appearance: int = 2):
 
 
 # ─────────────────────────────────────────────
-# Валидация через Smart Money
+# Валидация через Smart Money (БЕЗ ПОРТФЕЛЯ!)
 # ─────────────────────────────────────────────
 
 def validate_candidate(wallet: str, min_win_rate: float, min_pnl_sol: float, max_trades_per_day: int):
     try:
-        result = analyze_wallet(wallet)
+        # ВАЖНО: include_portfolio=False экономит память!
+        result = analyze_wallet(wallet, include_portfolio=False)
         stats = result.get("stats", {}) or {}
         win_rate = stats.get("win_rate")
         pnl = stats.get("total_pnl_sol")
