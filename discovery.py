@@ -1,7 +1,6 @@
 """
 Discovery — автопоиск умных кошельков.
-Источник: fallback-список мемкоинов.
-С валидацией адресов через Helius (отсеиваем PDA + пустые).
+Источник токенов: DexScreener Boosts (динамический топ) + fallback.
 """
 
 import os
@@ -22,13 +21,13 @@ if not HELIUS_API_KEY:
 logger = logging.getLogger(__name__)
 
 RPC_URL = f"https://mainnet.helius-rpc.com/?api-key={HELIUS_API_KEY}"
-HELIUS_TX_API = "https://api.helius.xyz/v0/addresses/{address}/transactions"
 SOL_MINT = "So11111111111111111111111111111111111111112"
 
 # ─────────────────────────────────────────────
 # НАСТРОЙКИ
 # ─────────────────────────────────────────────
 
+TOP_TOKENS_LIMIT = 10
 MIN_TOKEN_APPEARANCE = 2
 MIN_WIN_RATE = 45.0
 MIN_PNL_SOL = 5.0
@@ -36,13 +35,85 @@ MAX_TRADES_PER_DAY = 200
 MAX_CANDIDATES = 15
 MAX_VALIDATE = 2
 
+# Fallback на случай, если DexScreener не отвечает
+FALLBACK_TOKENS = [
+    {"mint": "2qEHjDLDLbuBgRYvsxhc5D6uDWAivNFZGan56P1tpump", "symbol": "PNUT"},
+    {"mint": "CzLSujWBLFsSjncfkh59rUFqvafWcYt5N2cqAy8Apump", "symbol": "WEN"},
+    {"mint": "9BB6NFEcjBCtnNLFko2FqVQBq8HHM13kCyYcdQbgpump", "symbol": "FARTCOIN"},
+    {"mint": "A8C3xuqscfmyLrte3VmTqrAq8kgMASius9AFNANwpump", "symbol": "FWOG"},
+    {"mint": "MEW1gQWJ3nEXg2qgERiKu7FAFj79PHvQVREQUzScPP5", "symbol": "MEW"},
+]
+
+
+# ─────────────────────────────────────────────
+# Динамический список токенов
+# ─────────────────────────────────────────────
+
+def get_trending_tokens(limit: int = TOP_TOKENS_LIMIT):
+    """
+    Топ токенов по бустам в DexScreener (ближайшее к трендам).
+    """
+    url = "https://api.dexscreener.com/token-boosts/top/v1"
+    try:
+        r = requests.get(url, timeout=15)
+        r.raise_for_status()
+        data = r.json()
+
+        # Фильтруем только Solana
+        solana_tokens = [
+            item for item in data
+            if item.get("chainId") == "solana"
+        ]
+
+        # Сортируем по количеству бустов
+        solana_tokens.sort(
+            key=lambda x: int(x.get("amount", 0) or 0),
+            reverse=True,
+        )
+
+        tokens = []
+        for item in solana_tokens[:limit]:
+            mint = item.get("tokenAddress")
+            if not mint:
+                continue
+            tokens.append({
+                "mint": mint,
+                "symbol": "BOOSTED",
+                "volume_24h": 0,
+                "market_cap": 0,
+            })
+
+        if tokens:
+            logger.info(f"  DexScreener топ по бустам: {len(tokens)} токенов")
+            return tokens
+        logger.warning("  DexScreener не вернул Solana-токенов")
+    except Exception as e:
+        logger.error(f"  Ошибка DexScreener: {e}")
+
+    return []
+
+
+def get_tokens():
+    """Возвращает токены: сначала DexScreener, потом fallback."""
+    # ─── Попытка 1: DexScreener ───
+    tokens = get_trending_tokens(limit=TOP_TOKENS_LIMIT)
+    if tokens:
+        for t in tokens:
+            logger.info(f"    - BOOSTED: {t['mint'][:12]}...")
+        return tokens
+
+    # ─── Попытка 2: fallback ───
+    logger.info(f"  Fallback: использую {len(FALLBACK_TOKENS)} токенов")
+    for t in FALLBACK_TOKENS:
+        logger.info(f"    - {t['symbol']}: {t['mint'][:12]}...")
+    return list(FALLBACK_TOKENS)
+
 
 # ─────────────────────────────────────────────
 # Валидация адресов
 # ─────────────────────────────────────────────
 
 BASE58_REGEX = re.compile(r'^[1-9A-HJ-NP-Za-km-z]{32,44}$')
-
 EXCLUDED_ADDRESSES = {
     "11111111111111111111111111111111",
     "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
@@ -57,7 +128,6 @@ _validated_addresses = {}
 
 
 def is_valid_format(addr: str) -> bool:
-    """Проверяет формат base58."""
     if not addr or not isinstance(addr, str):
         return False
     if len(addr) < 32 or len(addr) > 44:
@@ -72,79 +142,42 @@ def is_valid_format(addr: str) -> bool:
 
 
 def is_helius_valid_address(addr: str) -> bool:
-    """
-    Проверяет, что Helius видит адрес И у него есть транзакции.
-    Отсеивает PDA (пустой ответ) и invalid (dict с error).
-    """
     if addr in _validated_addresses:
         return _validated_addresses[addr]
 
-    url = HELIUS_TX_API.format(address=addr)
+    url = f"https://api.helius.xyz/v0/addresses/{addr}/transactions"
     params = {"api-key": HELIUS_API_KEY, "limit": 5}
     try:
         r = requests.get(url, params=params, timeout=10)
-        
         try:
             data = r.json()
         except Exception:
             _validated_addresses[addr] = False
             return False
-        
-        # Helius вернул ошибку
+
         if isinstance(data, dict):
-            err = data.get("error", "unknown")
-            logger.debug(f"    Helius error для {addr[:12]}: {err}")
             _validated_addresses[addr] = False
             return False
-        
-        # Список — проверяем, есть ли транзакции
+
         if isinstance(data, list):
             if len(data) == 0:
-                logger.debug(f"    Пустой ответ для {addr[:12]}")
                 _validated_addresses[addr] = False
                 return False
             _validated_addresses[addr] = True
             return True
-        
+
         _validated_addresses[addr] = False
         return False
-    except Exception as e:
-        logger.debug(f"    Ошибка проверки {addr[:12]}: {e}")
+    except Exception:
         _validated_addresses[addr] = False
         return False
 
 
 # ─────────────────────────────────────────────
-# Fallback: 10 мемкоинов
-# ─────────────────────────────────────────────
-
-FALLBACK_TOKENS = [
-    {"mint": "2qEHjDLDLbuBgRYvsxhc5D6uDWAivNFZGan56P1tpump", "symbol": "PNUT"},
-    {"mint": "CzLSujWBLFsSjncfkh59rUFqvafWcYt5N2cqAy8Apump", "symbol": "WEN"},
-    {"mint": "9BB6NFEcjBCtnNLFko2FqVQBq8HHM13kCyYcdQbgpump", "symbol": "FARTCOIN"},
-    {"mint": "A8C3xuqscfmyLrte3VmTqrAq8kgMASius9AFNANwpump", "symbol": "FWOG"},
-    {"mint": "MEW1gQWJ3nEXg2qgERiKu7FAFj79PHvQVREQUzScPP5", "symbol": "MEW"},
-    {"mint": "ukHH6c7mMyiWCf1b9pnWe25TSpkDDt3H5pQZgZ74J82", "symbol": "BOME"},
-    {"mint": "GJAFwWjJ3vnTsrQVabjBVK2TYB1YtRCQXRDfDgUnpump", "symbol": "MICHI"},
-    {"mint": "ED5nyyWEzpPPiWimP8vYm7sD7TD3LAt3Q3gRTWHzPJBY", "symbol": "MOODENG"},
-    {"mint": "7atgF8KQo4wJrD5ATGX7t1V2zVvykPJbFfNeVf1icFv1", "symbol": "MOTHER"},
-    {"mint": "HgcxVs6kJhPAaGqnPNGaa7zYgNT49hJrLufiqcNMuYZT", "symbol": "SPCX"},
-]
-
-
-def get_tokens():
-    logger.info(f"  Использую fallback: {len(FALLBACK_TOKENS)} токенов")
-    for t in FALLBACK_TOKENS:
-        logger.info(f"    - {t['symbol']}: {t['mint'][:12]}...")
-    return list(FALLBACK_TOKENS)
-
-
-# ─────────────────────────────────────────────
-# Поиск трейдеров токена
+# Поиск трейдеров
 # ─────────────────────────────────────────────
 
 def get_token_traders(token_mint: str, limit: int = 20):
-    """Покупатели и продавцы через OWNER-адреса."""
     payload = {
         "jsonrpc": "2.0", "id": 1,
         "method": "getSignaturesForAddress",
@@ -248,22 +281,13 @@ def find_candidates(tokens: list, min_appearance: int = 2):
     ]
     active.sort(key=lambda x: (role_priority.get(x["role"], 99), -x["count"]))
 
-    logger.info(f"  Всего кандидатов (формат ок): {len(active)}")
-
-    # Проверяем через Helius API (отсеиваем PDA и пустые)
     valid_active = []
-    checked = 0
     for c in active:
-        checked += 1
         if is_helius_valid_address(c["wallet"]):
             valid_active.append(c)
-            logger.info(f"    ✅ {c['wallet'][:16]}... — валидный")
-        else:
-            logger.info(f"    ⏭️  {c['wallet'][:16]}... — PDA/пустой")
         if len(valid_active) >= MAX_CANDIDATES:
             break
 
-    logger.info(f"  Проверено через Helius: {checked}, валидных: {len(valid_active)}")
     return valid_active[:MAX_CANDIDATES]
 
 
@@ -285,25 +309,13 @@ def validate_candidate(wallet: str, min_win_rate: float, min_pnl_sol: float, max
         total_trades = buys + sells
         trades_per_day = total_trades / 3 if total_trades else 0
 
-        logger.info(
-            f"    📊 {wallet}: buys={buys}, sells={sells}, "
-            f"closed={closed}, open={open_pos}, win={win_rate}, pnl={pnl}"
-        )
-
         if trades_per_day > max_trades_per_day:
-            logger.info(f"    ⏭️  бот ({trades_per_day:.0f}/день)")
             return None
-
         if not closed and not open_pos and buys == 0 and sells == 0:
-            logger.info(f"    ⏭️  нет активности")
             return None
-
         if closed and win_rate is not None and win_rate < min_win_rate:
-            logger.info(f"    ⏭️  win {win_rate:.0f}% < {min_win_rate}%")
             return None
-
         if closed and pnl is not None and pnl < min_pnl_sol:
-            logger.info(f"    ⏭️  PnL {pnl:.4f} < {min_pnl_sol}")
             return None
 
         return {
@@ -345,12 +357,10 @@ def _discover_impl():
     candidates = find_candidates(tokens, min_appearance=MIN_TOKEN_APPEARANCE)
 
     if not candidates:
-        return {"error": "Не найдено активных кандидатов (все PDA/пустые)"}
+        return {"error": "Не найдено активных кандидатов"}
 
     logger.info("")
     logger.info(f"  Найдено {len(candidates)} валидных кандидатов")
-    for c in candidates[:15]:
-        logger.info(f"    {c['wallet']} — role={c['role']}, токенов={c['count']}")
 
     logger.info("")
     logger.info(f"🧠 Шаг 3: Проверяю через Smart Money (топ-{MAX_VALIDATE})...")
@@ -365,7 +375,6 @@ def _discover_impl():
             info["tokens_bought"] = cand["tokens"]
             valid.append(info)
             logger.info(f"    ✅ ПОДХОДИТ! win={info['win_rate']}%, pnl={info['pnl_sol']} SOL")
-        time.sleep(0.3)
 
     logger.info("")
     logger.info(f"✅ Найдено {len(valid)} валидных кошельков")
@@ -376,10 +385,7 @@ def _discover_impl():
         win = x["win_rate"] if x["win_rate"] is not None else 0
         return (has_closed, has_pnl, win)
 
-    try:
-        valid.sort(key=sort_key, reverse=True)
-    except Exception as e:
-        logger.error(f"Ошибка сортировки: {e}")
+    valid.sort(key=sort_key, reverse=True)
 
     logger.info("🏁 ФИНАЛ")
 
