@@ -1,7 +1,7 @@
 """
 Discovery — автопоиск умных кошельков.
 Источник: fallback-список мемкоинов.
-С валидацией Solana-адресов (отсеиваем PDA и временные аккаунты).
+С проверкой адресов через Helius API (отсеиваем PDA).
 """
 
 import os
@@ -22,6 +22,7 @@ if not HELIUS_API_KEY:
 logger = logging.getLogger(__name__)
 
 RPC_URL = f"https://mainnet.helius-rpc.com/?api-key={HELIUS_API_KEY}"
+HELIUS_TX_API = "https://api.helius.xyz/v0/addresses/{address}/transactions"
 SOL_MINT = "So11111111111111111111111111111111111111112"
 
 # ─────────────────────────────────────────────
@@ -37,25 +38,27 @@ MAX_VALIDATE = 5
 
 
 # ─────────────────────────────────────────────
-# Валидация Solana-адресов
+# Валидация адресов
 # ─────────────────────────────────────────────
 
 BASE58_REGEX = re.compile(r'^[1-9A-HJ-NP-Za-km-z]{32,44}$')
 
-# Известные программы и системные адреса (отсеиваем)
 EXCLUDED_ADDRESSES = {
-    "11111111111111111111111111111111",  # System Program
-    "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",  # Token Program
-    "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",  # Token-2022
-    "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL",  # ATA
-    "ComputeBudget111111111111111111111111111111",  # Compute Budget
-    "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4",  # Jupiter
-    "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P",  # Pump.fun
+    "11111111111111111111111111111111",
+    "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+    "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
+    "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL",
+    "ComputeBudget111111111111111111111111111111",
+    "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4",
+    "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P",
 }
 
+# Кеш проверок через Helius
+_validated_addresses = {}
 
-def is_valid_solana_address(addr: str) -> bool:
-    """Проверяет, что адрес похож на реальный Solana-кошелёк."""
+
+def is_valid_format(addr: str) -> bool:
+    """Проверяет формат base58."""
     if not addr or not isinstance(addr, str):
         return False
     if len(addr) < 32 or len(addr) > 44:
@@ -67,6 +70,34 @@ def is_valid_solana_address(addr: str) -> bool:
     if addr == SOL_MINT:
         return False
     return True
+
+
+def is_helius_valid_address(addr: str) -> bool:
+    """
+    Проверяет, что Helius видит этот адрес как реальный кошелёк.
+    Использует кеш, чтобы не тратить кредиты.
+    """
+    if addr in _validated_addresses:
+        return _validated_addresses[addr]
+
+    url = HELIUS_TX_API.format(address=addr)
+    params = {"api-key": HELIUS_API_KEY, "limit": 1}
+    try:
+        r = requests.get(url, params=params, timeout=10)
+        if r.status_code == 200:
+            try:
+                data = r.json()
+                if isinstance(data, list):
+                    _validated_addresses[addr] = True
+                    return True
+            except Exception:
+                pass
+        # 400 = invalid address, 404 = not found
+        _validated_addresses[addr] = False
+        return False
+    except Exception:
+        _validated_addresses[addr] = False
+        return False
 
 
 # ─────────────────────────────────────────────
@@ -88,7 +119,6 @@ FALLBACK_TOKENS = [
 
 
 def get_tokens():
-    """Возвращает fallback-список."""
     logger.info(f"  Использую fallback: {len(FALLBACK_TOKENS)} токенов")
     for t in FALLBACK_TOKENS:
         logger.info(f"    - {t['symbol']}: {t['mint'][:12]}...")
@@ -100,7 +130,7 @@ def get_tokens():
 # ─────────────────────────────────────────────
 
 def get_token_traders(token_mint: str, limit: int = 20):
-    """Покупатели и продавцы через OWNER-адреса (с валидацией)."""
+    """Покупатели и продавцы через OWNER-адреса."""
     payload = {
         "jsonrpc": "2.0", "id": 1,
         "method": "getSignaturesForAddress",
@@ -116,7 +146,6 @@ def get_token_traders(token_mint: str, limit: int = 20):
 
         buyers = set()
         sellers = set()
-        invalid_count = 0
 
         for sig_info in signatures[:10]:
             sig = sig_info.get("signature")
@@ -142,21 +171,16 @@ def get_token_traders(token_mint: str, limit: int = 20):
                 pre_map = {}
                 for b in pre_balances:
                     owner = b.get("owner")
-                    if owner:
+                    if owner and is_valid_format(owner):
                         pre_map[owner] = float(b.get("uiTokenAmount", {}).get("uiAmount") or 0)
 
                 post_map = {}
                 for b in post_balances:
                     owner = b.get("owner")
-                    if owner:
+                    if owner and is_valid_format(owner):
                         post_map[owner] = float(b.get("uiTokenAmount", {}).get("uiAmount") or 0)
 
                 for owner in post_map:
-                    # ВАЛИДАЦИЯ адреса
-                    if not is_valid_solana_address(owner):
-                        invalid_count += 1
-                        continue
-
                     pre_amt = pre_map.get(owner, 0)
                     post_amt = post_map[owner]
                     if post_amt > pre_amt:
@@ -169,9 +193,6 @@ def get_token_traders(token_mint: str, limit: int = 20):
                 continue
 
             time.sleep(0.05)
-
-        if invalid_count > 0:
-            logger.info(f"    ⚠️  отсеяно невалидных адресов: {invalid_count}")
 
         return list(buyers), list(sellers)
 
@@ -212,7 +233,24 @@ def find_candidates(tokens: list, min_appearance: int = 2):
         if data["count"] >= min_appearance
     ]
     active.sort(key=lambda x: (role_priority.get(x["role"], 99), -x["count"]))
-    return active[:MAX_CANDIDATES]
+
+    logger.info(f"  Всего кандидатов (формат ок): {len(active)}")
+
+    # Проверяем через Helius API (отсеиваем PDA)
+    valid_active = []
+    checked = 0
+    for c in active:
+        checked += 1
+        if is_helius_valid_address(c["wallet"]):
+            valid_active.append(c)
+            logger.info(f"    ✅ {c['wallet'][:16]}... — валидный")
+        else:
+            logger.info(f"    ⏭️  {c['wallet'][:16]}... — PDA/invalid")
+        if len(valid_active) >= MAX_CANDIDATES:
+            break
+
+    logger.info(f"  Проверено через Helius: {checked}, валидных: {len(valid_active)}")
+    return valid_active[:MAX_CANDIDATES]
 
 
 # ─────────────────────────────────────────────
@@ -293,10 +331,10 @@ def _discover_impl():
     candidates = find_candidates(tokens, min_appearance=MIN_TOKEN_APPEARANCE)
 
     if not candidates:
-        return {"error": "Не найдено активных кандидатов"}
+        return {"error": "Не найдено активных кандидатов (все PDA)"}
 
     logger.info("")
-    logger.info(f"  Найдено {len(candidates)} кандидатов:")
+    logger.info(f"  Найдено {len(candidates)} валидных кандидатов:")
     for c in candidates[:15]:
         logger.info(f"    {c['wallet']} — role={c['role']}, токенов={c['count']}")
 
