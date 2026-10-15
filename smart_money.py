@@ -18,10 +18,6 @@ _token_prices = {}
 _sol_price_usd = None
 
 
-# ─────────────────────────────────────────────
-# Имена и цены
-# ─────────────────────────────────────────────
-
 def get_token_name(mint: str):
     if mint in _token_names:
         return _token_names[mint]
@@ -88,10 +84,6 @@ def get_token_price_usd(mint: str):
         _token_prices[mint] = None
         return None
 
-
-# ─────────────────────────────────────────────
-# Балансы
-# ─────────────────────────────────────────────
 
 def get_sol_balance(address: str):
     payload = {"jsonrpc": "2.0", "id": 1, "method": "getBalance", "params": [address]}
@@ -170,12 +162,7 @@ def summarize_portfolio(address: str):
     }
 
 
-# ─────────────────────────────────────────────
-# Транзакции
-# ─────────────────────────────────────────────
-
 def fetch_transactions(address, limit=100, before=None):
-    """Без фильтра type=SWAP — чтобы ловить pump.fun транзакции."""
     url = BASE_URL.format(address=address)
     params = {"api-key": HELIUS_API_KEY, "limit": limit}
     if before:
@@ -189,7 +176,8 @@ def fetch_transactions(address, limit=100, before=None):
         return []
 
 
-def fetch_all_txs(address, max_pages=3):
+def fetch_all_txs(address, max_pages=1):
+    """max_pages=1 — экономия памяти."""
     all_txs = []
     before = None
     for page in range(max_pages):
@@ -201,23 +189,12 @@ def fetch_all_txs(address, max_pages=3):
         if len(txs) < 100:
             break
         before = txs[-1]["signature"]
-        time.sleep(0.3)
+        time.sleep(0.2)
     return all_txs
 
 
-# ─────────────────────────────────────────────
-# НОВЫЙ ПАРСЕР ЧЕРЕЗ БАЛАНСЫ
-# ─────────────────────────────────────────────
-
 def parse_swap_balances(tx, wallet_address):
-    """
-    Определяет BUY/SELL через ИЗМЕНЕНИЕ БАЛАНСОВ.
-    
-    Возвращает:
-        {"action": "BUY", "token": mint, "token_amount": X, "sol_amount": Y, "timestamp": T}
-        {"action": "SELL", "token": mint, "token_amount": X, "sol_amount": Y, "timestamp": T}
-        None — если это не swap для этого кошелька
-    """
+    """BUY/SELL через ИЗМЕНЕНИЕ БАЛАНСОВ."""
     meta = tx.get("meta", {})
     if not meta:
         return None
@@ -225,8 +202,6 @@ def parse_swap_balances(tx, wallet_address):
     pre_balances = meta.get("preTokenBalances", [])
     post_balances = meta.get("postTokenBalances", [])
 
-    # Собираем изменения балансов для owner
-    # Формат: {mint: (pre_amount, post_amount)}
     changes = {}
 
     for b in pre_balances:
@@ -256,9 +231,7 @@ def parse_swap_balances(tx, wallet_address):
     if not changes:
         return None
 
-    # SOL-баланс: pre/post
-    # В Helius Enhanced это НЕ в preTokenBalances.
-    # Считаем через accountKeys + preBalances/postBalances
+    # SOL change
     sol_change = 0.0
     try:
         account_keys = tx.get("accountKeys", [])
@@ -276,7 +249,6 @@ def parse_swap_balances(tx, wallet_address):
     except Exception:
         sol_change = 0.0
 
-    # Ищем единственное значимое изменение токена
     significant_changes = []
     for mint, amt in changes.items():
         if mint == SOL_MINT:
@@ -284,57 +256,38 @@ def parse_swap_balances(tx, wallet_address):
         delta = amt["post"] - amt["pre"]
         if abs(delta) > 0:
             significant_changes.append({
-                "mint": mint,
-                "delta": delta,
-                "pre": amt["pre"],
-                "post": amt["post"],
+                "mint": mint, "delta": delta,
+                "pre": amt["pre"], "post": amt["post"],
             })
 
     if not significant_changes:
         return None
 
-    # Берём самый крупный по модулю delta
     significant_changes.sort(key=lambda x: abs(x["delta"]), reverse=True)
     main = significant_changes[0]
-
     timestamp = tx.get("timestamp")
 
-    # Если delta > 0 — получил токен = BUY (потратил SOL)
     if main["delta"] > 0:
-        # sol_change будет отрицательным (потратил SOL)
         sol_spent = abs(sol_change) if sol_change < 0 else 0
         return {
-            "action": "BUY",
-            "token": main["mint"],
-            "token_amount": main["delta"],
-            "sol_amount": sol_spent,
+            "action": "BUY", "token": main["mint"],
+            "token_amount": main["delta"], "sol_amount": sol_spent,
             "timestamp": timestamp,
         }
 
-    # Если delta < 0 — отдал токен = SELL (получил SOL)
     if main["delta"] < 0:
         sol_received = sol_change if sol_change > 0 else 0
         return {
-            "action": "SELL",
-            "token": main["mint"],
-            "token_amount": abs(main["delta"]),
-            "sol_amount": sol_received,
+            "action": "SELL", "token": main["mint"],
+            "token_amount": abs(main["delta"]), "sol_amount": sol_received,
             "timestamp": timestamp,
         }
 
     return None
 
 
-# ─────────────────────────────────────────────
-# PnL через балансы
-# ─────────────────────────────────────────────
-
 def analyze_pnl(txs, wallet_address):
-    """
-    Считает PnL через FIFO, используя parse_swap_balances.
-    """
     sorted_txs = sorted(txs, key=lambda t: t.get("timestamp", 0))
-
     positions = {}
     closed = []
     buys_count = 0
@@ -352,8 +305,7 @@ def analyze_pnl(txs, wallet_address):
         if parsed["action"] == "BUY":
             buys_count += 1
             positions.setdefault(token, []).append({
-                "amount": amount,
-                "sol_spent": sol_amount,
+                "amount": amount, "sol_spent": sol_amount,
                 "timestamp": parsed["timestamp"],
             })
 
@@ -382,72 +334,25 @@ def analyze_pnl(txs, wallet_address):
                     remaining = 0
 
             if tokens_matched > 0:
-                # Пропорционально: получили sol_amount за amount токенов,
-                # сопоставили tokens_matched
                 sol_received_matched = sol_amount * (tokens_matched / amount) if amount else 0
                 pnl_sol = sol_received_matched - sol_spent_matched
                 pnl_pct = (pnl_sol / sol_spent_matched * 100) if sol_spent_matched > 0 else 0
-
                 closed.append({
-                    "token": token,
-                    "tokens_matched": tokens_matched,
-                    "sol_spent": sol_spent_matched,
-                    "sol_received": sol_received_matched,
-                    "pnl_sol": pnl_sol,
-                    "pnl_percent": pnl_pct,
+                    "token": token, "tokens_matched": tokens_matched,
+                    "sol_spent": sol_spent_matched, "sol_received": sol_received_matched,
+                    "pnl_sol": pnl_sol, "pnl_percent": pnl_pct,
                     "timestamp": parsed["timestamp"],
                 })
 
     return closed, positions, buys_count, sells_count
 
 
-def summarize_open_positions(positions):
-    sol_price = get_sol_price_usd()
-    summary = []
-    for token, buys in positions.items():
-        if not buys:
-            continue
-        total_tokens = sum(b["amount"] for b in buys)
-        total_sol = sum(b["sol_spent"] for b in buys)
-        if total_tokens <= 0:
-            continue
-        avg_price_sol = total_sol / total_tokens if total_tokens else 0
-        first_ts = min(b["timestamp"] for b in buys)
-
-        token_price_usd = get_token_price_usd(token)
-        current_value_usd = None
-        unrealized_pnl_sol = None
-        unrealized_pnl_pct = None
-
-        if token_price_usd and sol_price:
-            current_value_usd = total_tokens * token_price_usd
-            current_value_sol = current_value_usd / sol_price
-            unrealized_pnl_sol = current_value_sol - total_sol
-            if total_sol > 0:
-                unrealized_pnl_pct = (unrealized_pnl_sol / total_sol) * 100
-
-        summary.append({
-            "token": token, "tokens": total_tokens, "sol_invested": total_sol,
-            "avg_price_sol": avg_price_sol, "first_buy_ts": first_ts,
-            "unrealized_pnl_sol": unrealized_pnl_sol,
-            "unrealized_pnl_pct": unrealized_pnl_pct,
-            "current_value_usd": current_value_usd,
-        })
-    summary.sort(key=lambda x: x["sol_invested"], reverse=True)
-    return summary
-
-
-# ─────────────────────────────────────────────
-# Главная функция
-# ─────────────────────────────────────────────
-
 def analyze_wallet(address):
     print(f"\n🔍 Анализируем кошелёк: {address}\n")
 
-    print("💰 Считаем баланс кошелька...")
     portfolio = summarize_portfolio(address)
 
-    txs = fetch_all_txs(address, max_pages=3)
+    txs = fetch_all_txs(address, max_pages=1)
     if not txs:
         return {
             "verdict": "UNKNOWN",
@@ -461,9 +366,14 @@ def analyze_wallet(address):
 
     now = time.time()
     txs_recent = [t for t in txs if t.get("timestamp", 0) > now - 3 * 86400]
-    print(f"📅 За 3 дня: {len(txs_recent)}")
+    swaps_recent_count = len(txs_recent)
+    print(f"📅 За 3 дня: {swaps_recent_count}")
 
     closed, open_positions, buys, sells = analyze_pnl(txs_recent, address)
+
+    # Освобождаем память
+    del txs
+    del txs_recent
 
     print(f"\n🛒 Покупок: {buys}")
     print(f"💸 Продаж: {sells}")
@@ -479,7 +389,6 @@ def analyze_wallet(address):
     if closed_with_sol:
         winners = [p for p in closed_with_sol if p["pnl_sol"] > 0]
         losers = [p for p in closed_with_sol if p["pnl_sol"] <= 0]
-
         total_pnl_sol = sum(p["pnl_sol"] for p in closed_with_sol)
         win_rate = (len(winners) / len(closed_with_sol) * 100) if closed_with_sol else 0
         avg_win = sum(p["pnl_sol"] for p in winners) / len(winners) if winners else 0
@@ -488,13 +397,13 @@ def analyze_wallet(address):
     if closed_with_sol:
         if win_rate >= 50 and total_pnl_sol > 0 and len(closed_with_sol) >= 3:
             verdict = "PASS"
-            reason = f"✅ Прибыльный: win rate {win_rate:.0f}%, PnL {total_pnl_sol:+.4f} SOL."
+            reason = f"✅ Прибыльный: win {win_rate:.0f}%, PnL {total_pnl_sol:+.4f} SOL."
         elif total_pnl_sol > 0:
             verdict = "WEAK"
-            reason = f"⚠️  Слабо прибыльный: win rate {win_rate:.0f}%, PnL {total_pnl_sol:+.4f} SOL."
+            reason = f"⚠️  Слабо прибыльный: win {win_rate:.0f}%, PnL {total_pnl_sol:+.4f} SOL."
         else:
             verdict = "REJECT"
-            reason = f"❌ Убыточный: win rate {win_rate:.0f}%, PnL {total_pnl_sol:+.4f} SOL."
+            reason = f"❌ Убыточный: win {win_rate:.0f}%, PnL {total_pnl_sol:+.4f} SOL."
     else:
         verdict = "UNKNOWN"
         reason = f"❓ Нет закрытых с SOL. Покупок: {buys}, продаж: {sells}."
@@ -503,7 +412,7 @@ def analyze_wallet(address):
         "verdict": verdict,
         "reason": reason,
         "stats": {
-            "swaps_recent": len(txs_recent),
+            "swaps_recent": swaps_recent_count,
             "buys": buys, "sells": sells,
             "closed_positions": len(closed),
             "closed_with_sol": len(closed_with_sol),

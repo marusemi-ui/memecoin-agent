@@ -1,5 +1,6 @@
 """
-Discovery — автопоиск «умных кошельков» через свежие pump.fun токены.
+Discovery — автопоиск умных кошельков.
+Источники: pump.fun API → DexScreener → fallback.
 """
 
 import os
@@ -22,16 +23,16 @@ RPC_URL = f"https://mainnet.helius-rpc.com/?api-key={HELIUS_API_KEY}"
 SOL_MINT = "So11111111111111111111111111111111111111112"
 
 # ─────────────────────────────────────────────
-# НАСТРОЙКИ
+# НАСТРОЙКИ (снижены для экономии памяти)
 # ─────────────────────────────────────────────
 
 TOP_TOKENS_LIMIT = 10
-MIN_TOKEN_APPEARANCE = 2
-MIN_WIN_RATE = 45.0          # 45% — реалистичный минимум
-MIN_PNL_SOL = 5.0            # минимум 5 SOL прибыли за 3 дня
-MAX_TRADES_PER_DAY = 200     # 200 — не бот-микро-скальпер
-MAX_CANDIDATES = 30
-MAX_VALIDATE = 20
+MIN_TOKEN_APPEARANCE = 3
+MIN_WIN_RATE = 45.0
+MIN_PNL_SOL = 5.0
+MAX_TRADES_PER_DAY = 200
+MAX_CANDIDATES = 15
+MAX_VALIDATE = 5
 
 
 FALLBACK_TOKENS = [
@@ -49,41 +50,82 @@ FALLBACK_TOKENS = [
 
 
 def get_fresh_pumpfun_tokens(limit: int = TOP_TOKENS_LIMIT):
+    """pump.fun → DexScreener → fallback."""
+    # ─── Попытка 1: pump.fun ───
     url = "https://frontend-api-v3.pump.fun/coins"
     params = {"offset": 0, "limit": 100, "sort": "created_timestamp", "order": "DESC"}
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+        "Accept": "application/json",
+        "Origin": "https://pump.fun",
+        "Referer": "https://pump.fun/",
+    }
     try:
-        r = requests.get(url, params=params, timeout=15)
+        r = requests.get(url, params=params, headers=headers, timeout=15)
         r.raise_for_status()
         data = r.json()
-        if not isinstance(data, list):
-            logger.warning(f"pump.fun вернул не список: {type(data)}")
-            return []
-        logger.info(f"  pump.fun вернул {len(data)} токенов")
+        if isinstance(data, list):
+            logger.info(f"  pump.fun вернул {len(data)} токенов")
+            tokens = []
+            for coin in data:
+                mint = coin.get("mint")
+                symbol = coin.get("symbol", "?")
+                market_cap = float(coin.get("usd_market_cap", 0) or 0)
+                if not mint or market_cap < 20_000:
+                    continue
+                tokens.append({"mint": mint, "symbol": symbol, "volume_24h": market_cap, "market_cap": market_cap})
+                if len(tokens) >= limit:
+                    break
+            if tokens:
+                logger.info(f"  Отобрано {len(tokens)} токенов (MC > $20k)")
+                return tokens
+            logger.warning("  Все < $20k, иду в DexScreener")
+    except Exception as e:
+        logger.warning(f"  pump.fun API: {e}")
+
+    # ─── Попытка 2: DexScreener ───
+    try:
+        url2 = "https://api.dexscreener.com/latest/dex/search?q=pump"
+        r2 = requests.get(url2, timeout=15)
+        r2.raise_for_status()
+        data2 = r2.json()
+        pairs = data2.get("pairs", [])
+        logger.info(f"  DexScreener вернул {len(pairs)} пар")
+
+        sol_pairs = [
+            p for p in pairs
+            if p.get("chainId") == "solana"
+            and float(p.get("liquidity", {}).get("usd", 0) or 0) > 5_000
+        ]
+        sol_pairs.sort(key=lambda p: float(p.get("volume", {}).get("h24", 0) or 0), reverse=True)
+
+        seen = set()
         tokens = []
-        for coin in data:
-            mint = coin.get("mint")
-            symbol = coin.get("symbol", "?")
-            market_cap = float(coin.get("usd_market_cap", 0) or 0)
-            if not mint or market_cap < 20_000:
+        for p in sol_pairs:
+            mint = p.get("baseToken", {}).get("address")
+            symbol = p.get("baseToken", {}).get("symbol", "?")
+            if not mint or mint in seen or mint == SOL_MINT:
                 continue
-            tokens.append({"mint": mint, "symbol": symbol, "volume_24h": market_cap, "market_cap": market_cap})
+            seen.add(mint)
+            tokens.append({"mint": mint, "symbol": symbol, "volume_24h": 0, "market_cap": 0})
             if len(tokens) >= limit:
                 break
-        if tokens:
-            logger.info(f"  Отобрано {len(tokens)} свежих токенов (MC > $20k)")
-            for t in tokens:
-                logger.info(f"    - {t['symbol']}: MC ${t['market_cap']:,.0f}")
-            return tokens
-        logger.warning("  Все токены pump.fun < $20k, использую fallback")
-    except Exception as e:
-        logger.error(f"  Ошибка pump.fun API: {e}, использую fallback")
 
-    logger.info(f"  Fallback: использую {len(FALLBACK_TOKENS[:limit])} токенов")
+        if tokens:
+            logger.info(f"  DexScreener: {len(tokens)} токенов")
+            for t in tokens:
+                logger.info(f"    - {t['symbol']}: {t['mint'][:8]}...")
+            return tokens
+    except Exception as e:
+        logger.error(f"  DexScreener: {e}")
+
+    # ─── Попытка 3: fallback ───
+    logger.info(f"  Fallback: {len(FALLBACK_TOKENS[:limit])} токенов")
     return [dict(t, volume_24h=0, market_cap=0) for t in FALLBACK_TOKENS[:limit]]
 
 
-def get_token_traders(token_mint: str, limit: int = 30):
-    """Возвращает покупателей и продавцов через OWNER-адреса."""
+def get_token_traders(token_mint: str, limit: int = 20):
+    """Покупатели и продавцы через OWNER-адреса."""
     payload = {
         "jsonrpc": "2.0", "id": 1,
         "method": "getSignaturesForAddress",
@@ -100,7 +142,7 @@ def get_token_traders(token_mint: str, limit: int = 30):
         buyers = set()
         sellers = set()
 
-        for sig_info in signatures[:15]:
+        for sig_info in signatures[:10]:
             sig = sig_info.get("signature")
             if not sig:
                 continue
@@ -145,7 +187,7 @@ def get_token_traders(token_mint: str, limit: int = 30):
                 logger.debug(f"Ошибка парсинга tx: {e}")
                 continue
 
-            time.sleep(0.1)
+            time.sleep(0.05)
 
         return list(buyers), list(sellers)
 
@@ -154,7 +196,7 @@ def get_token_traders(token_mint: str, limit: int = 30):
         return [], []
 
 
-def find_candidates(tokens: list):
+def find_candidates(tokens: list, min_appearance: int = 3):
     wallet_data = {}
     for i, token in enumerate(tokens):
         mint = token["mint"]
@@ -177,19 +219,19 @@ def find_candidates(tokens: list):
             wallet_data[w]["count"] += 1
             wallet_data[w]["tokens"].append(symbol)
 
-        time.sleep(0.3)
+        time.sleep(0.2)
 
     role_priority = {"both": 0, "seller": 1, "buyer": 2}
     active = [
         {"wallet": w, "count": data["count"], "role": data["role"], "tokens": data["tokens"]}
         for w, data in wallet_data.items()
-        if data["count"] >= MIN_TOKEN_APPEARANCE
+        if data["count"] >= min_appearance
     ]
     active.sort(key=lambda x: (role_priority.get(x["role"], 99), -x["count"]))
     return active[:MAX_CANDIDATES]
 
 
-def validate_candidate(wallet: str):
+def validate_candidate(wallet: str, min_win_rate: float, min_pnl_sol: float, max_trades_per_day: int):
     try:
         result = analyze_wallet(wallet)
         stats = result.get("stats", {}) or {}
@@ -199,34 +241,29 @@ def validate_candidate(wallet: str):
         open_pos = stats.get("open_positions", 0)
         buys = stats.get("buys", 0)
         sells = stats.get("sells", 0)
-        swaps_recent = stats.get("swaps_recent", 0)
 
         total_trades = buys + sells
         trades_per_day = total_trades / 3 if total_trades else 0
 
         logger.info(
-            f"    📊 {wallet}: swaps={swaps_recent}, buys={buys}, sells={sells}, "
+            f"    📊 {wallet}: buys={buys}, sells={sells}, "
             f"closed={closed}, open={open_pos}, win={win_rate}, pnl={pnl}"
         )
 
-        # Фильтр ботов
-        if trades_per_day > MAX_TRADES_PER_DAY:
-            logger.info(f"    ⏭️  бот ({trades_per_day:.0f}/день > {MAX_TRADES_PER_DAY})")
+        if trades_per_day > max_trades_per_day:
+            logger.info(f"    ⏭️  бот ({trades_per_day:.0f}/день)")
             return None
 
-        # Нет активности
         if not closed and not open_pos and buys == 0 and sells == 0:
             logger.info(f"    ⏭️  нет активности")
             return None
 
-        # Win rate
-        if closed and win_rate is not None and win_rate < MIN_WIN_RATE:
-            logger.info(f"    ⏭️  win {win_rate:.0f}% < {MIN_WIN_RATE}%")
+        if closed and win_rate is not None and win_rate < min_win_rate:
+            logger.info(f"    ⏭️  win {win_rate:.0f}% < {min_win_rate}%")
             return None
 
-        # PnL — ключевой фильтр
-        if closed and pnl is not None and pnl < MIN_PNL_SOL:
-            logger.info(f"    ⏭️  PnL {pnl:.4f} SOL < {MIN_PNL_SOL} SOL")
+        if closed and pnl is not None and pnl < min_pnl_sol:
+            logger.info(f"    ⏭️  PnL {pnl:.4f} < {min_pnl_sol}")
             return None
 
         return {
@@ -244,47 +281,47 @@ def discover_smart_wallets():
     try:
         return _discover_impl()
     except Exception as e:
-        logger.exception("КРИТИЧЕСКАЯ ОШИБКА в discover_smart_wallets")
+        logger.exception("КРИТИЧЕСКАЯ ОШИБКА")
         return {"error": f"Внутренняя ошибка: {str(e)[:200]}"}
 
 
 def _discover_impl():
     logger.info("=" * 60)
-    logger.info("🔍 НАЧИНАЮ АВТОПОИСК УМНЫХ КОШЕЛЬКОВ")
-    logger.info(f"   Фильтр: win rate ≥ {MIN_WIN_RATE}%, PnL ≥ {MIN_PNL_SOL} SOL")
+    logger.info("🔍 АВТОПОИСК УМНЫХ КОШЕЛЬКОВ")
+    logger.info(f"   win ≥ {MIN_WIN_RATE}%, PnL ≥ {MIN_PNL_SOL} SOL")
     logger.info("=" * 60)
 
-    logger.info("📊 Шаг 1: Получаю свежие pump.fun токены...")
+    logger.info("📊 Шаг 1: Получаю токены...")
     tokens = get_fresh_pumpfun_tokens(limit=TOP_TOKENS_LIMIT)
     if not tokens:
         return {"error": "Не удалось получить токены"}
 
     logger.info("")
     logger.info("👥 Шаг 2: Ищу трейдеров...")
-    candidates = find_candidates(tokens)
+    candidates = find_candidates(tokens, min_appearance=MIN_TOKEN_APPEARANCE)
 
     if not candidates:
         return {"error": "Не найдено активных кандидатов"}
 
     logger.info("")
-    logger.info(f"  Найдено {len(candidates)} кандидатов:")
-    for c in candidates[:30]:
+    logger.info(f"  Найдено {len(candidates)} кандидатов")
+    for c in candidates[:15]:
         logger.info(f"    {c['wallet']} — role={c['role']}, токенов={c['count']}")
 
     logger.info("")
-    logger.info(f"🧠 Шаг 3: Проверяю через Smart Money...")
+    logger.info(f"🧠 Шаг 3: Проверяю через Smart Money (топ-{MAX_VALIDATE})...")
     valid = []
     for i, cand in enumerate(candidates[:MAX_VALIDATE]):
         wallet = cand["wallet"]
         logger.info(f"  [{i+1}/{min(len(candidates), MAX_VALIDATE)}] {wallet}")
 
-        info = validate_candidate(wallet)
+        info = validate_candidate(wallet, MIN_WIN_RATE, MIN_PNL_SOL, MAX_TRADES_PER_DAY)
         if info:
             info["role"] = cand["role"]
             info["tokens_bought"] = cand["tokens"]
             valid.append(info)
             logger.info(f"    ✅ ПОДХОДИТ! win={info['win_rate']}%, pnl={info['pnl_sol']} SOL")
-        time.sleep(0.5)
+        time.sleep(0.3)
 
     logger.info("")
     logger.info(f"✅ Найдено {len(valid)} валидных кошельков")
@@ -300,7 +337,7 @@ def _discover_impl():
     except Exception as e:
         logger.error(f"Ошибка сортировки: {e}")
 
-    logger.info("🏁 ФИНАЛ: возвращаю результат")
+    logger.info("🏁 ФИНАЛ")
 
     return {
         "tokens_checked": len(tokens),
