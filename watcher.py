@@ -35,6 +35,7 @@ UPSTASH_KEY = "memecoin_agent:watched_wallets"
 NOTIFY_WEAK = True
 NOTIFY_IGNORE = False
 NOTIFY_REJECT = False
+NOTIFY_SELLS = True
 
 
 # ─────────────────────────────────────────────
@@ -109,7 +110,6 @@ def list_wallets():
 # ─────────────────────────────────────────────
 
 def fetch_signatures(address: str, limit: int = 5):
-    """Загружает последние подписи кошелька через RPC."""
     payload = {
         "jsonrpc": "2.0", "id": 1,
         "method": "getSignaturesForAddress",
@@ -126,10 +126,6 @@ def fetch_signatures(address: str, limit: int = 5):
 
 
 def cleanup_inactive_wallets(days_inactive: int = 7):
-    """
-    Удаляет кошельки, у которых нет транзакций > days_inactive дней.
-    Возвращает (removed, kept).
-    """
     data = load_watch_data()
     if not data:
         return [], []
@@ -213,6 +209,43 @@ def parse_buy(tx, wallet_address):
     return None
 
 
+def parse_sell(tx, wallet_address):
+    """Определяет продажу токена."""
+    if tx.get("type") != "SWAP":
+        return None
+    transfers = tx.get("tokenTransfers", [])
+    if not transfers:
+        return None
+
+    sent_tokens = []
+    received_tokens = []
+    sol_received = 0.0
+
+    for t in transfers:
+        mint = t.get("mint", "")
+        amount = float(t.get("tokenAmount", 0) or 0)
+        from_acc = t.get("fromUserAccount", "")
+        to_acc = t.get("toUserAccount", "")
+
+        if from_acc == wallet_address:
+            if mint == SOL_MINT:
+                sol_received += amount
+            else:
+                sent_tokens.append(mint)
+        elif to_acc == wallet_address:
+            if mint != SOL_MINT:
+                received_tokens.append(mint)
+
+    if sent_tokens and not received_tokens and sol_received > 0:
+        return {
+            "token": sent_tokens[0],
+            "sol_amount": sol_received,
+            "signature": tx.get("signature"),
+            "timestamp": tx.get("timestamp"),
+        }
+    return None
+
+
 def send_telegram_message(text: str):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         logger.warning("Нет TELEGRAM_BOT_TOKEN или TELEGRAM_CHAT_ID")
@@ -233,7 +266,7 @@ def send_telegram_message(text: str):
 def notify_new_buy(wallet: str, buy_info: dict):
     token = buy_info["token"]
     sol_amount = buy_info["sol_amount"]
-    logger.info(f"🔔 Новая покупка: {wallet[:8]}... купил {token[:8]}...")
+    logger.info(f"🔔 Покупка: {wallet[:8]}... купил {token[:8]}...")
 
     try:
         result = evaluate_signal(token, wallet)
@@ -261,7 +294,7 @@ def notify_new_buy(wallet: str, buy_info: dict):
 
         if verdict == "SIGNAL":
             text = (
-                f"{emoji} СИЛЬНЫЙ СИГНАЛ!\n"
+                f"{emoji} СИЛЬНЫЙ СИГНАЛ (покупка)!\n"
                 f"Confidence: {confidence:.3f}\n\n"
                 f"🪙 Токен: {token}\n"
                 f"👤 Кошелёк: {wallet}\n"
@@ -281,7 +314,7 @@ def notify_new_buy(wallet: str, buy_info: dict):
                 )
         else:
             text = (
-                f"{emoji} Слабый сигнал ({verdict})\n"
+                f"{emoji} Слабый сигнал (покупка)\n"
                 f"Confidence: {confidence:.3f}\n\n"
                 f"🪙 Токен: {token}\n"
                 f"💰 Потрачено: {sol_amount:.4f} SOL\n"
@@ -290,6 +323,24 @@ def notify_new_buy(wallet: str, buy_info: dict):
         send_telegram_message(text)
     except Exception as e:
         logger.exception("Ошибка анализа покупки")
+
+
+def notify_sell(wallet: str, sell_info: dict):
+    """Уведомление о продаже."""
+    token = sell_info["token"]
+    sol_amount = sell_info["sol_amount"]
+    logger.info(f"💸 Продажа: {wallet[:8]}... продал {token[:8]}...")
+
+    if not NOTIFY_SELLS:
+        return
+
+    text = (
+        f"💸 ПРОДАЖА\n\n"
+        f"👤 Кошелёк: {wallet}\n"
+        f"🪙 Токен: {token}\n"
+        f"💰 Получено: {sol_amount:.4f} SOL\n"
+    )
+    send_telegram_message(text)
 
 
 def check_wallet(wallet: str, watch_data: dict):
@@ -314,6 +365,10 @@ def check_wallet(wallet: str, watch_data: dict):
         buy = parse_buy(tx, wallet)
         if buy:
             notify_new_buy(wallet, buy)
+            continue
+        sell = parse_sell(tx, wallet)
+        if sell:
+            notify_sell(wallet, sell)
 
 
 def run_watcher_loop():

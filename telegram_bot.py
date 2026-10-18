@@ -78,7 +78,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/watch <wallet>\n"
         "/unwatch <wallet>\n"
         "/list\n"
-        "/cleanup — удалить неактивные кошельки\n"
+        "/stats — статистика\n"
+        "/cleanup — удалить неактивные\n"
         "/discover — найти умные кошельки\n"
         "/help"
     )
@@ -91,6 +92,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "👁️ /watch <wallet> — добавить в мониторинг\n"
         "/unwatch <wallet> — удалить\n"
         "/list — показать список\n"
+        "📊 /stats — статистика по кошелькам\n"
         "🧹 /cleanup — удалить неактивные (> 7 дней)\n"
         "🎯 /discover — автопоиск умных кошельков"
     )
@@ -183,8 +185,67 @@ async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text)
 
 
+async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Статистика по кошелькам."""
+    wallets = list_wallets()
+    if not wallets:
+        await update.message.reply_text("📭 Список пуст.")
+        return
+
+    msg = await update.message.reply_text(f"📊 Собираю статистику по {len(wallets)} кошелькам...")
+
+    try:
+        import asyncio
+        import time
+        from watcher import fetch_signatures
+
+        now = time.time()
+        cutoff_7d = now - 7 * 86400
+
+        active_count = 0
+        inactive_count = 0
+        details = []
+
+        for w in wallets:
+            try:
+                loop = asyncio.get_event_loop()
+                sigs = await loop.run_in_executor(None, fetch_signatures, w, 5)
+                if not sigs:
+                    inactive_count += 1
+                    details.append((w, 0, "нет транзакций"))
+                    continue
+                latest = sigs[0].get("blockTime") or 0
+                if latest < cutoff_7d:
+                    inactive_count += 1
+                    details.append((w, 0, "> 7 дней"))
+                else:
+                    active_count += 1
+                    days_ago = (now - latest) / 86400
+                    details.append((w, latest, f"{days_ago:.1f} дн. назад"))
+            except Exception as e:
+                details.append((w, 0, f"ошибка"))
+
+        text = f"📊 СТАТИСТИКА\n\n"
+        text += f"👁️ Всего кошельков: {len(wallets)}\n"
+        text += f"✅ Активных (7 дней): {active_count}\n"
+        text += f"💤 Неактивных: {inactive_count}\n\n"
+
+        details.sort(key=lambda x: x[1], reverse=True)
+        text += "🕐 Последняя активность:\n"
+        for i, (w, ts, info) in enumerate(details[:10], 1):
+            text += f"{i}. {w[:20]}... — {info}\n"
+
+        if len(details) > 10:
+            text += f"\n... и ещё {len(details) - 10}"
+
+        await msg.edit_text(text)
+
+    except Exception as e:
+        logger.exception("Ошибка /stats")
+        await msg.edit_text(f"❌ Ошибка: {e}")
+
+
 async def cmd_cleanup(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Удаляет кошельки без транзакций > 7 дней."""
     msg = await update.message.reply_text("🧹 Проверяю кошельки на неактивность (> 7 дней)...")
     try:
         import asyncio
@@ -289,6 +350,7 @@ def main():
     app.add_handler(CommandHandler("watch", cmd_watch))
     app.add_handler(CommandHandler("unwatch", cmd_unwatch))
     app.add_handler(CommandHandler("list", cmd_list))
+    app.add_handler(CommandHandler("stats", cmd_stats))
     app.add_handler(CommandHandler("cleanup", cmd_cleanup))
     app.add_handler(CommandHandler("discover", cmd_discover))
     print("🤖 Бот запущен.")
