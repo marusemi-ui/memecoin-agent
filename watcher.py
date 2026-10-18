@@ -1,7 +1,5 @@
 """
 Watcher — фоновый мониторинг кошельков с хранением в Upstash Redis.
-Каждые N секунд проверяет новые транзакции в отслеживаемых кошельках
-и присылает сигналы в Telegram при новых покупках.
 """
 
 import os
@@ -23,22 +21,16 @@ UPSTASH_TOKEN = os.getenv("UPSTASH_REDIS_REST_TOKEN")
 if not HELIUS_API_KEY:
     raise ValueError("Нет HELIUS_API_KEY в .env!")
 if not UPSTASH_URL or not UPSTASH_TOKEN:
-    raise ValueError("Нет UPSTASH_REDIS_REST_URL или UPSTASH_REDIS_REST_TOKEN в .env!")
+    raise ValueError("Нет UPSTASH переменных в .env!")
 
 logger = logging.getLogger(__name__)
 
 BASE_URL = "https://api.helius.xyz/v0/addresses/{address}/transactions"
+RPC_URL = f"https://mainnet.helius-rpc.com/?api-key={HELIUS_API_KEY}"
 SOL_MINT = "So11111111111111111111111111111111111111112"
 
-CHECK_INTERVAL = 300  # 5 минут
-
-# Ключ в Upstash, где хранится JSON со списком кошельков
+CHECK_INTERVAL = 300
 UPSTASH_KEY = "memecoin_agent:watched_wallets"
-
-
-# ─────────────────────────────────────────────
-# НАСТРОЙКИ ФИЛЬТРАЦИИ
-# ─────────────────────────────────────────────
 
 NOTIFY_WEAK = True
 NOTIFY_IGNORE = False
@@ -46,14 +38,10 @@ NOTIFY_REJECT = False
 
 
 # ─────────────────────────────────────────────
-# UPSTASH: хранилище
+# UPSTASH
 # ─────────────────────────────────────────────
 
 def upstash_command(*args):
-    """
-    Отправляет команду в Upstash Redis через REST API.
-    Возвращает поле 'result' из ответа.
-    """
     url = UPSTASH_URL
     headers = {
         "Authorization": f"Bearer {UPSTASH_TOKEN}",
@@ -62,39 +50,32 @@ def upstash_command(*args):
     try:
         r = requests.post(url, headers=headers, json=list(args), timeout=15)
         r.raise_for_status()
-        data = r.json()
-        return data.get("result")
+        return r.json().get("result")
     except Exception as e:
         logger.error(f"Ошибка Upstash: {e}")
         return None
 
 
 def load_watch_data():
-    """Загружает JSON со списком кошельков из Upstash."""
     raw = upstash_command("GET", UPSTASH_KEY)
     if not raw:
         return {}
     try:
-        # Upstash возвращает строку, внутри которой JSON
         if isinstance(raw, str):
             return json.loads(raw)
         return raw if isinstance(raw, dict) else {}
     except Exception as e:
-        logger.error(f"Ошибка парсинга JSON из Upstash: {e}")
+        logger.error(f"Ошибка парсинга JSON: {e}")
         return {}
 
 
 def save_watch_data(data):
-    """Сохраняет JSON со списком кошельков в Upstash."""
     try:
         payload = json.dumps(data, ensure_ascii=False)
         result = upstash_command("SET", UPSTASH_KEY, payload)
-        if result == "OK":
-            return True
-        logger.warning(f"Upstash SET вернул: {result}")
-        return False
+        return result == "OK"
     except Exception as e:
-        logger.error(f"Ошибка сохранения в Upstash: {e}")
+        logger.error(f"Ошибка сохранения: {e}")
         return False
 
 
@@ -124,16 +105,69 @@ def list_wallets():
 
 
 # ─────────────────────────────────────────────
-# Проверка транзакций
+# Cleanup
+# ─────────────────────────────────────────────
+
+def fetch_signatures(address: str, limit: int = 5):
+    """Загружает последние подписи кошелька через RPC."""
+    payload = {
+        "jsonrpc": "2.0", "id": 1,
+        "method": "getSignaturesForAddress",
+        "params": [address, {"limit": limit}],
+    }
+    try:
+        r = requests.post(RPC_URL, json=payload, timeout=15)
+        r.raise_for_status()
+        data = r.json()
+        return data.get("result", [])
+    except Exception as e:
+        logger.warning(f"Ошибка getSignaturesForAddress: {e}")
+        return []
+
+
+def cleanup_inactive_wallets(days_inactive: int = 7):
+    """
+    Удаляет кошельки, у которых нет транзакций > days_inactive дней.
+    Возвращает (removed, kept).
+    """
+    data = load_watch_data()
+    if not data:
+        return [], []
+
+    now = time.time()
+    cutoff = now - days_inactive * 86400
+
+    removed = []
+    kept = []
+
+    for wallet in list(data.keys()):
+        sigs = fetch_signatures(wallet, limit=5)
+        if not sigs:
+            remove_wallet(wallet)
+            removed.append(wallet)
+            logger.info(f"🗑️ Удалён (нет транзакций): {wallet[:16]}...")
+            continue
+
+        latest = sigs[0].get("blockTime") or 0
+        if latest < cutoff:
+            remove_wallet(wallet)
+            removed.append(wallet)
+            logger.info(f"🗑️ Удалён (последняя > {days_inactive}д): {wallet[:16]}...")
+        else:
+            kept.append(wallet)
+
+        time.sleep(0.2)
+
+    return removed, kept
+
+
+# ─────────────────────────────────────────────
+# Мониторинг
 # ─────────────────────────────────────────────
 
 def fetch_recent_swaps(address: str, limit: int = 20):
     url = BASE_URL.format(address=address)
-    params = {
-        "api-key": HELIUS_API_KEY,
-        "limit": limit,
-        "type": "SWAP",
-    }
+    params = {"api-key": HELIUS_API_KEY, "limit": limit, "type": "SWAP"}
     try:
         r = requests.get(url, params=params, timeout=30)
         r.raise_for_status()
@@ -146,7 +180,6 @@ def fetch_recent_swaps(address: str, limit: int = 20):
 def parse_buy(tx, wallet_address):
     if tx.get("type") != "SWAP":
         return None
-
     transfers = tx.get("tokenTransfers", [])
     if not transfers:
         return None
@@ -180,15 +213,10 @@ def parse_buy(tx, wallet_address):
     return None
 
 
-# ─────────────────────────────────────────────
-# Отправка сигналов в Telegram
-# ─────────────────────────────────────────────
-
 def send_telegram_message(text: str):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         logger.warning("Нет TELEGRAM_BOT_TOKEN или TELEGRAM_CHAT_ID")
         return
-
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
@@ -205,35 +233,23 @@ def send_telegram_message(text: str):
 def notify_new_buy(wallet: str, buy_info: dict):
     token = buy_info["token"]
     sol_amount = buy_info["sol_amount"]
-
     logger.info(f"🔔 Новая покупка: {wallet[:8]}... купил {token[:8]}...")
 
     try:
         result = evaluate_signal(token, wallet)
-
         verdict = result.get("verdict", "UNKNOWN")
         confidence = result.get("confidence", 0.0) or 0.0
         breakdown = result.get("breakdown", {}) or {}
         sm_stats = result.get("smart_money_stats", {}) or {}
 
         if verdict == "REJECT" and not NOTIFY_REJECT:
-            logger.info(f"⏭️  REJECT отфильтрован: {token[:8]}...")
             return
-
         if verdict == "IGNORE" and not NOTIFY_IGNORE:
-            logger.info(f"⏭️  IGNORE отфильтрован: {token[:8]}...")
             return
-
         if verdict == "WEAK" and not NOTIFY_WEAK:
-            logger.info(f"⏭️  WEAK отфильтрован: {token[:8]}...")
             return
 
-        emoji = {
-            "SIGNAL": "🚀",
-            "WEAK": "⚠️",
-            "IGNORE": "❌",
-            "REJECT": "🛑",
-        }.get(verdict, "❓")
+        emoji = {"SIGNAL": "🚀", "WEAK": "⚠️", "IGNORE": "❌", "REJECT": "🛑"}.get(verdict, "❓")
 
         def fmt(v):
             if v is None:
@@ -255,7 +271,6 @@ def notify_new_buy(wallet: str, buy_info: dict):
                 f"├ Smart Money: {fmt(breakdown.get('smart_money'))}\n"
                 f"└ Liquidity:   {fmt(breakdown.get('liquidity'))}\n"
             )
-
             win_rate = sm_stats.get("win_rate")
             pnl = sm_stats.get("total_pnl_sol")
             if win_rate is not None or pnl is not None:
@@ -273,14 +288,9 @@ def notify_new_buy(wallet: str, buy_info: dict):
             )
 
         send_telegram_message(text)
-
     except Exception as e:
         logger.exception("Ошибка анализа покупки")
 
-
-# ─────────────────────────────────────────────
-# Фоновый цикл
-# ─────────────────────────────────────────────
 
 def check_wallet(wallet: str, watch_data: dict):
     txs = fetch_recent_swaps(wallet, limit=20)
@@ -288,7 +298,6 @@ def check_wallet(wallet: str, watch_data: dict):
         return
 
     last_signature = watch_data.get(wallet, {}).get("last_signature")
-
     new_txs = []
     for tx in txs:
         sig = tx.get("signature")
@@ -324,8 +333,6 @@ def run_watcher_loop():
                 save_watch_data(watch_data)
             else:
                 logger.info("👁️  Список кошельков пуст")
-
         except Exception as e:
             logger.exception("Ошибка в цикле watcher")
-
         time.sleep(CHECK_INTERVAL)

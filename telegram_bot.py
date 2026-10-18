@@ -10,7 +10,7 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 from aggregator import evaluate_signal
-from watcher import add_wallet, remove_wallet, list_wallets
+from watcher import add_wallet, remove_wallet, list_wallets, cleanup_inactive_wallets
 
 load_dotenv()
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -78,6 +78,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/watch <wallet>\n"
         "/unwatch <wallet>\n"
         "/list\n"
+        "/cleanup — удалить неактивные кошельки\n"
         "/discover — найти умные кошельки\n"
         "/help"
     )
@@ -90,6 +91,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "👁️ /watch <wallet> — добавить в мониторинг\n"
         "/unwatch <wallet> — удалить\n"
         "/list — показать список\n"
+        "🧹 /cleanup — удалить неактивные (> 7 дней)\n"
         "🎯 /discover — автопоиск умных кошельков"
     )
 
@@ -181,6 +183,31 @@ async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text)
 
 
+async def cmd_cleanup(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Удаляет кошельки без транзакций > 7 дней."""
+    msg = await update.message.reply_text("🧹 Проверяю кошельки на неактивность (> 7 дней)...")
+    try:
+        import asyncio
+        loop = asyncio.get_event_loop()
+        removed, kept = await loop.run_in_executor(None, cleanup_inactive_wallets)
+
+        text = "🧹 Очистка завершена:\n\n"
+        text += f"✅ Оставлено активных: {len(kept)}\n"
+        text += f"🗑️ Удалено неактивных: {len(removed)}\n\n"
+
+        if removed:
+            text += "Удалённые кошельки:\n"
+            for w in removed:
+                text += f"• {w}\n"
+        else:
+            text += "Все кошельки активны — удалять нечего."
+
+        await msg.edit_text(text)
+    except Exception as e:
+        logger.exception("Ошибка /cleanup")
+        await msg.edit_text(f"❌ Ошибка: {e}")
+
+
 async def cmd_discover(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text(
         "🔍 Автопоиск...\n\n"
@@ -214,7 +241,6 @@ async def cmd_discover(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        # ─── АВТО-ДОБАВЛЕНИЕ ───
         auto_added = []
         for w in valid:
             if w.get("auto_watch"):
@@ -222,7 +248,6 @@ async def cmd_discover(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     auto_added.append(w["wallet"])
                     logger.info(f"✅ Авто-добавлен: {w['wallet'][:16]}...")
 
-        # Формируем сообщение
         text = (
             f"🎯 Найдено {len(valid)} кошельков:\n"
             f"(win ≥ {MIN_WIN_RATE}%, PnL ≥ {MIN_PNL_SOL} SOL)\n"
@@ -241,17 +266,13 @@ async def cmd_discover(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"   Покупок: {w.get('buys', 0)}, Продаж: {w.get('sells', 0)}\n\n"
             )
 
-        # Итог по авто-добавлению
         if auto_added:
             text += f"\n✅ Автоматически добавлено в мониторинг: {len(auto_added)}\n"
             text += f"(> {AUTO_WATCH_MIN_TRADES} сделок)\n\n"
 
         text += "💡 /watch WALLET — добавить вручную"
 
-        logger.info(f"📤 Длина сообщения: {len(text)} символов")
-
         await safe_edit(msg, text)
-
     except Exception as e:
         logger.exception("Ошибка /discover")
         try:
@@ -268,6 +289,7 @@ def main():
     app.add_handler(CommandHandler("watch", cmd_watch))
     app.add_handler(CommandHandler("unwatch", cmd_unwatch))
     app.add_handler(CommandHandler("list", cmd_list))
+    app.add_handler(CommandHandler("cleanup", cmd_cleanup))
     app.add_handler(CommandHandler("discover", cmd_discover))
     print("🤖 Бот запущен.")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
