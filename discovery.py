@@ -1,10 +1,12 @@
 """
 Discovery — автопоиск умных кошельков.
 Источник: DexScreener Boosts (с кешем на 1 час) + fallback.
+Авто-тюнинг MIN_TOKEN_APPEARANCE.
 """
 
 import os
 import re
+import json
 import time
 import logging
 import requests
@@ -28,7 +30,7 @@ SOL_MINT = "So11111111111111111111111111111111111111112"
 # ─────────────────────────────────────────────
 
 TOP_TOKENS_LIMIT = 10
-MIN_TOKEN_APPEARANCE = 1       # ← было 2 (теперь 1)
+MIN_TOKEN_APPEARANCE = 1  # дефолт (может меняться авто)
 MIN_WIN_RATE = 45.0
 MIN_PNL_SOL = 5.0
 MAX_TRADES_PER_DAY = 200
@@ -39,6 +41,10 @@ AUTO_WATCH_MIN_TRADES = 5
 
 # Кеш DexScreener (1 час)
 _tokens_cache = {"data": None, "expires_at": 0}
+
+# История прогонов
+HISTORY_KEY = "memecoin_agent:discovery_history"
+HISTORY_MAX = 10
 
 
 FALLBACK_TOKENS = [
@@ -53,6 +59,54 @@ FALLBACK_TOKENS = [
     {"mint": "7atgF8KQo4wJrD5ATGX7t1V2zVvykPJbFfNeVf1icFv1", "symbol": "MOTHER"},
     {"mint": "HgcxVs6kJhPAaGqnPNGaa7zYgNT49hJrLufiqcNMuYZT", "symbol": "SPCX"},
 ]
+
+
+# ─────────────────────────────────────────────
+# История и авто-тюнинг
+# ─────────────────────────────────────────────
+
+def load_discovery_history():
+    from watcher import upstash_command
+    raw = upstash_command("GET", HISTORY_KEY)
+    if not raw:
+        return []
+    try:
+        if isinstance(raw, str):
+            return json.loads(raw)
+        return raw if isinstance(raw, list) else []
+    except Exception:
+        return []
+
+
+def save_discovery_history(valid_count: int, candidates_found: int):
+    from watcher import upstash_command
+    history = load_discovery_history()
+    history.append({
+        "timestamp": int(time.time()),
+        "valid": valid_count,
+        "candidates": candidates_found,
+    })
+    history = history[-HISTORY_MAX:]
+    payload = json.dumps(history, ensure_ascii=False)
+    upstash_command("SET", HISTORY_KEY, payload)
+
+
+def auto_tune_min_appearance():
+    history = load_discovery_history()
+    if len(history) < 3:
+        return 1
+
+    recent = history[-5:]
+    avg_valid = sum(h.get("valid", 0) for h in recent) / len(recent)
+
+    if avg_valid > 8:
+        logger.info(f"🎛️ Авто-тюнинг: MIN_APP=2 (avg_valid={avg_valid:.1f})")
+        return 2
+    elif avg_valid < 2:
+        logger.info(f"🎛️ Авто-тюнинг: MIN_APP=1 (avg_valid={avg_valid:.1f})")
+        return 1
+    else:
+        return 1
 
 
 # ─────────────────────────────────────────────
@@ -293,7 +347,7 @@ def find_candidates(tokens: list, min_appearance: int = 1):
 
 
 # ─────────────────────────────────────────────
-# Валидация через Smart Money
+# Валидация
 # ─────────────────────────────────────────────
 
 def validate_candidate(wallet: str, min_win_rate: float, min_pnl_sol: float, max_trades_per_day: int):
@@ -308,7 +362,6 @@ def validate_candidate(wallet: str, min_win_rate: float, min_pnl_sol: float, max
         sells = stats.get("sells", 0)
 
         total_trades = buys + sells
-        # trades_per_day считается по 7 дням (окно анализа)
         trades_per_day = total_trades / ANALYSIS_DAYS if total_trades else 0
 
         logger.info(
@@ -320,9 +373,8 @@ def validate_candidate(wallet: str, min_win_rate: float, min_pnl_sol: float, max
             logger.info(f"    ⏭️  бот ({trades_per_day:.0f}/день)")
             return None
 
-        # ОСЛАБЛЕННЫЙ ФИЛЬТР: отсеиваем только тех, у кого НЕТ ни покупок, ни продаж
         if buys == 0 and sells == 0:
-            logger.info(f"    ⏭️  нет активности (buys={buys}, sells={sells})")
+            logger.info(f"    ⏭️  нет активности")
             return None
 
         if closed and win_rate is not None and win_rate < min_win_rate:
@@ -373,9 +425,14 @@ def _discover_impl():
 
     logger.info("")
     logger.info("👥 Шаг 2: Ищу трейдеров...")
-    candidates = find_candidates(tokens, min_appearance=MIN_TOKEN_APPEARANCE)
+
+    dynamic_min_app = auto_tune_min_appearance()
+    logger.info(f"  🎛️ MIN_APPEARANCE: {dynamic_min_app} (авто)")
+
+    candidates = find_candidates(tokens, min_appearance=dynamic_min_app)
 
     if not candidates:
+        save_discovery_history(0, 0)
         return {"error": "Не найдено активных кандидатов"}
 
     logger.info("")
@@ -398,6 +455,9 @@ def _discover_impl():
 
     logger.info("")
     logger.info(f"✅ Найдено {len(valid)} валидных кошельков")
+
+    # Сохраняем историю
+    save_discovery_history(len(valid), len(candidates))
 
     def sort_key(x):
         activity = x.get("buys", 0) + x.get("sells", 0)
