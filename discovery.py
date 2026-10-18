@@ -35,6 +35,9 @@ MAX_TRADES_PER_DAY = 200
 MAX_CANDIDATES = 15
 MAX_VALIDATE = 5
 
+# Авто-добавление: минимум сделок для авто-watch
+AUTO_WATCH_MIN_TRADES = 5
+
 # Кеш DexScreener (1 час)
 _tokens_cache = {"data": None, "expires_at": 0}
 
@@ -278,7 +281,6 @@ def find_candidates(tokens: list, min_appearance: int = 2):
         if data["count"] >= min_appearance
     ]
 
-    # Сортировка по count (активности в разных токенах) + role
     active.sort(key=lambda x: (-x["count"], role_priority.get(x["role"], 99)))
 
     valid_active = []
@@ -331,11 +333,15 @@ def validate_candidate(wallet: str, min_win_rate: float, min_pnl_sol: float, max
             logger.info(f"    ⏭️  PnL {pnl:.4f} < {min_pnl_sol}")
             return None
 
+        # Авто-добавление: > AUTO_WATCH_MIN_TRADES сделок
+        auto_watch = (buys + sells) >= AUTO_WATCH_MIN_TRADES
+
         return {
             "wallet": wallet, "win_rate": win_rate, "pnl_sol": pnl,
             "closed": closed, "open_positions": open_pos,
             "buys": buys, "sells": sells,
             "trades_per_day": round(trades_per_day, 1),
+            "auto_watch": auto_watch,
         }
     except Exception as e:
         logger.error(f"Ошибка валидации {wallet}: {e}")
@@ -387,13 +393,13 @@ def _discover_impl():
             info["role"] = cand["role"]
             info["tokens_bought"] = cand["tokens"]
             valid.append(info)
-            logger.info(f"    ✅ ПОДХОДИТ! buys={info['buys']}, sells={info['sells']}")
+            logger.info(f"    ✅ ПОДХОДИТ! buys={info['buys']}, sells={info['sells']}, auto_watch={info['auto_watch']}")
         time.sleep(0.3)
 
     logger.info("")
     logger.info(f"✅ Найдено {len(valid)} валидных кошельков")
 
-    # Сортировка по общей активности (buys + sells)
+    # Сортировка по общей активности
     def sort_key(x):
         activity = x.get("buys", 0) + x.get("sells", 0)
         has_pnl = 1 if (x["pnl_sol"] is not None and x["pnl_sol"] > 0) else 0

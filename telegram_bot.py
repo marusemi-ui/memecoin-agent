@@ -61,7 +61,6 @@ def fmt_amount(v):
 
 
 async def safe_edit(msg, text):
-    """Простая отправка текста без форматирования."""
     try:
         await msg.edit_text(text)
         logger.info(f"✅ Отправлено ({len(text)} символов)")
@@ -191,7 +190,7 @@ async def cmd_discover(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     try:
         import asyncio
-        from discovery import discover_smart_wallets, MIN_WIN_RATE, MIN_PNL_SOL
+        from discovery import discover_smart_wallets, MIN_WIN_RATE, MIN_PNL_SOL, AUTO_WATCH_MIN_TRADES
         loop = asyncio.get_event_loop()
         result = await loop.run_in_executor(None, discover_smart_wallets)
 
@@ -215,7 +214,15 @@ async def cmd_discover(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        # ЧИСТЫЙ ТЕКСТ — без HTML тегов
+        # ─── АВТО-ДОБАВЛЕНИЕ ───
+        auto_added = []
+        for w in valid:
+            if w.get("auto_watch"):
+                if add_wallet(w["wallet"]):
+                    auto_added.append(w["wallet"])
+                    logger.info(f"✅ Авто-добавлен: {w['wallet'][:16]}...")
+
+        # Формируем сообщение
         text = (
             f"🎯 Найдено {len(valid)} кошельков:\n"
             f"(win ≥ {MIN_WIN_RATE}%, PnL ≥ {MIN_PNL_SOL} SOL)\n"
@@ -224,15 +231,22 @@ async def cmd_discover(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for i, w in enumerate(valid, 1):
             win = f"{w['win_rate']:.0f}%" if w['win_rate'] is not None else "—"
             pnl = f"{w['pnl_sol']:+.4f}" if w['pnl_sol'] is not None else "—"
+            auto_mark = " ✅ в мониторинге" if w.get("auto_watch") else ""
             text += (
-                f"{i}. {w['wallet']}\n"
+                f"{i}. {w['wallet']}{auto_mark}\n"
                 f"   Win: {win}, PnL: {pnl} SOL\n"
                 f"   Роль: {w.get('role', '?')}\n"
                 f"   Сделок/день: {w.get('trades_per_day', '—')}\n"
                 f"   Закрытых: {w.get('closed', 0)}, Открытых: {w.get('open_positions', 0)}\n"
                 f"   Покупок: {w.get('buys', 0)}, Продаж: {w.get('sells', 0)}\n\n"
             )
-        text += "💡 /watch WALLET — добавить"
+
+        # Итог по авто-добавлению
+        if auto_added:
+            text += f"\n✅ Автоматически добавлено в мониторинг: {len(auto_added)}\n"
+            text += f"(> {AUTO_WATCH_MIN_TRADES} сделок)\n\n"
+
+        text += "💡 /watch WALLET — добавить вручную"
 
         logger.info(f"📤 Длина сообщения: {len(text)} символов")
 
