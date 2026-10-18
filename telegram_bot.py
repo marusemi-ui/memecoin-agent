@@ -1,5 +1,6 @@
 """
 Telegram-бот — обработчики команд.
+Без HTML/Markdown — чистый текст.
 """
 
 import os
@@ -60,20 +61,14 @@ def fmt_amount(v):
 
 
 async def safe_edit(msg, text):
-    """Безопасная отправка — с HTML, потом без, потом лог."""
+    """Простая отправка текста без форматирования."""
     try:
-        await msg.edit_text(text, parse_mode="HTML")
-        logger.info(f"✅ Отправлено с HTML ({len(text)} символов)")
+        await msg.edit_text(text)
+        logger.info(f"✅ Отправлено ({len(text)} символов)")
         return True
     except Exception as e:
-        logger.error(f"❌ HTML не сработал: {e}")
-        try:
-            await msg.edit_text(text)
-            logger.info(f"✅ Отправлено без форматирования ({len(text)} символов)")
-            return True
-        except Exception as e2:
-            logger.error(f"❌ Отправка не удалась: {e2}")
-            return False
+        logger.error(f"❌ Отправка не удалась: {e}")
+        return False
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -190,7 +185,7 @@ async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_discover(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text(
         "🔍 Автопоиск...\n\n"
-        "Ищу трейдеров в свежих pump.fun токенах.\n"
+        "Ищу трейдеров в свежих токенах.\n"
         "Фильтр: win rate ≥ 45%, PnL ≥ 5 SOL\n\n"
         "1-2 минуты."
     )
@@ -220,9 +215,9 @@ async def cmd_discover(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        # HTML вместо Markdown
+        # ЧИСТЫЙ ТЕКСТ — без HTML тегов
         text = (
-            f"🎯 <b>Найдено {len(valid)} кошельков:</b>\n"
+            f"🎯 Найдено {len(valid)} кошельков:\n"
             f"(win ≥ {MIN_WIN_RATE}%, PnL ≥ {MIN_PNL_SOL} SOL)\n"
             f"Проверено {tokens_checked} токенов, {candidates_found} кандидатов\n\n"
         )
@@ -230,14 +225,13 @@ async def cmd_discover(update: Update, context: ContextTypes.DEFAULT_TYPE):
             win = f"{w['win_rate']:.0f}%" if w['win_rate'] is not None else "—"
             pnl = f"{w['pnl_sol']:+.4f}" if w['pnl_sol'] is not None else "—"
             text += (
-                f"<b>{i}.</b> <code>{w['wallet']}</code>\n"
+                f"{i}. {w['wallet']}\n"
                 f"   Win: {win}, PnL: {pnl} SOL\n"
                 f"   Роль: {w.get('role', '?')}\n"
                 f"   Сделок/день: {w.get('trades_per_day', '—')}\n"
                 f"   Закрытых: {w.get('closed', 0)}, Открытых: {w.get('open_positions', 0)}\n"
                 f"   Покупок: {w.get('buys', 0)}, Продаж: {w.get('sells', 0)}\n\n"
             )
-        # ИСПРАВЛЕНО: без угловых скобок в <wallet>
         text += "💡 /watch WALLET — добавить"
 
         logger.info(f"📤 Длина сообщения: {len(text)} символов")
@@ -249,7 +243,7 @@ async def cmd_discover(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             await msg.edit_text(f"❌ Ошибка: {e}")
         except Exception as e2:
-            logger.error(f"Не удалось даже показать ошибку: {e2}")
+            logger.error(f"Не удалось показать ошибку: {e2}")
 
 
 def main():
