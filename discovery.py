@@ -33,7 +33,7 @@ MIN_WIN_RATE = 45.0
 MIN_PNL_SOL = 5.0
 MAX_TRADES_PER_DAY = 200
 MAX_CANDIDATES = 15
-MAX_VALIDATE = 3
+MAX_VALIDATE = 5
 
 # Кеш DexScreener (1 час)
 _tokens_cache = {"data": None, "expires_at": 0}
@@ -278,7 +278,7 @@ def find_candidates(tokens: list, min_appearance: int = 2):
         if data["count"] >= min_appearance
     ]
 
-    # ГЛАВНОЕ ИЗМЕНЕНИЕ: сортируем по count ПЕРВЫМ, потом role
+    # Сортировка по count (активности в разных токенах) + role
     active.sort(key=lambda x: (-x["count"], role_priority.get(x["role"], 99)))
 
     valid_active = []
@@ -318,9 +318,9 @@ def validate_candidate(wallet: str, min_win_rate: float, min_pnl_sol: float, max
             logger.info(f"    ⏭️  бот ({trades_per_day:.0f}/день)")
             return None
 
-        # ОСЛАБИЛИ: принимаем с открытыми позициями
-        if not closed and not open_pos and buys == 0 and sells == 0:
-            logger.info(f"    ⏭️  нет активности")
+        # ФИЛЬТР: только активные трейдеры (buys > 0 И sells > 0)
+        if buys == 0 or sells == 0:
+            logger.info(f"    ⏭️  мало активности (buys={buys}, sells={sells})")
             return None
 
         if closed and win_rate is not None and win_rate < min_win_rate:
@@ -387,17 +387,17 @@ def _discover_impl():
             info["role"] = cand["role"]
             info["tokens_bought"] = cand["tokens"]
             valid.append(info)
-            logger.info(f"    ✅ ПОДХОДИТ! win={info['win_rate']}, pnl={info['pnl_sol']}")
+            logger.info(f"    ✅ ПОДХОДИТ! buys={info['buys']}, sells={info['sells']}")
         time.sleep(0.3)
 
     logger.info("")
     logger.info(f"✅ Найдено {len(valid)} валидных кошельков")
 
+    # Сортировка по общей активности (buys + sells)
     def sort_key(x):
-        has_closed = 1 if x["closed"] else 0
+        activity = x.get("buys", 0) + x.get("sells", 0)
         has_pnl = 1 if (x["pnl_sol"] is not None and x["pnl_sol"] > 0) else 0
-        win = x["win_rate"] if x["win_rate"] is not None else 0
-        return (has_closed, has_pnl, win)
+        return (activity, has_pnl)
 
     valid.sort(key=sort_key, reverse=True)
 
