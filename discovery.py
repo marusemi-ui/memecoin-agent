@@ -10,7 +10,7 @@ import logging
 import requests
 from dotenv import load_dotenv
 
-from smart_money import analyze_wallet
+from smart_money import analyze_wallet, ANALYSIS_DAYS
 
 load_dotenv()
 HELIUS_API_KEY = os.getenv("HELIUS_API_KEY")
@@ -28,14 +28,13 @@ SOL_MINT = "So11111111111111111111111111111111111111112"
 # ─────────────────────────────────────────────
 
 TOP_TOKENS_LIMIT = 10
-MIN_TOKEN_APPEARANCE = 2
+MIN_TOKEN_APPEARANCE = 1       # ← было 2 (теперь 1)
 MIN_WIN_RATE = 45.0
 MIN_PNL_SOL = 5.0
 MAX_TRADES_PER_DAY = 200
 MAX_CANDIDATES = 15
 MAX_VALIDATE = 5
 
-# Авто-добавление: минимум сделок для авто-watch
 AUTO_WATCH_MIN_TRADES = 5
 
 # Кеш DexScreener (1 час)
@@ -249,7 +248,7 @@ def get_token_traders(token_mint: str, limit: int = 20):
         return [], []
 
 
-def find_candidates(tokens: list, min_appearance: int = 2):
+def find_candidates(tokens: list, min_appearance: int = 1):
     wallet_data = {}
     for i, token in enumerate(tokens):
         mint = token["mint"]
@@ -309,7 +308,8 @@ def validate_candidate(wallet: str, min_win_rate: float, min_pnl_sol: float, max
         sells = stats.get("sells", 0)
 
         total_trades = buys + sells
-        trades_per_day = total_trades / 3 if total_trades else 0
+        # trades_per_day считается по 7 дням (окно анализа)
+        trades_per_day = total_trades / ANALYSIS_DAYS if total_trades else 0
 
         logger.info(
             f"    📊 {wallet[:16]}: buys={buys}, sells={sells}, "
@@ -320,9 +320,9 @@ def validate_candidate(wallet: str, min_win_rate: float, min_pnl_sol: float, max
             logger.info(f"    ⏭️  бот ({trades_per_day:.0f}/день)")
             return None
 
-        # ФИЛЬТР: только активные трейдеры (buys > 0 И sells > 0)
-        if buys == 0 or sells == 0:
-            logger.info(f"    ⏭️  мало активности (buys={buys}, sells={sells})")
+        # ОСЛАБЛЕННЫЙ ФИЛЬТР: отсеиваем только тех, у кого НЕТ ни покупок, ни продаж
+        if buys == 0 and sells == 0:
+            logger.info(f"    ⏭️  нет активности (buys={buys}, sells={sells})")
             return None
 
         if closed and win_rate is not None and win_rate < min_win_rate:
@@ -333,7 +333,6 @@ def validate_candidate(wallet: str, min_win_rate: float, min_pnl_sol: float, max
             logger.info(f"    ⏭️  PnL {pnl:.4f} < {min_pnl_sol}")
             return None
 
-        # Авто-добавление: > AUTO_WATCH_MIN_TRADES сделок
         auto_watch = (buys + sells) >= AUTO_WATCH_MIN_TRADES
 
         return {
@@ -364,6 +363,7 @@ def _discover_impl():
     logger.info("=" * 60)
     logger.info("🔍 АВТОПОИСК УМНЫХ КОШЕЛЬКОВ")
     logger.info(f"   win ≥ {MIN_WIN_RATE}%, PnL ≥ {MIN_PNL_SOL} SOL")
+    logger.info(f"   Окно анализа: {ANALYSIS_DAYS} дней")
     logger.info("=" * 60)
 
     logger.info("📊 Шаг 1: Получаю токены...")
@@ -399,7 +399,6 @@ def _discover_impl():
     logger.info("")
     logger.info(f"✅ Найдено {len(valid)} валидных кошельков")
 
-    # Сортировка по общей активности
     def sort_key(x):
         activity = x.get("buys", 0) + x.get("sells", 0)
         has_pnl = 1 if (x["pnl_sol"] is not None and x["pnl_sol"] > 0) else 0

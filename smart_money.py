@@ -20,17 +20,14 @@ if not HELIUS_API_KEY:
 RPC_URL = f"https://mainnet.helius-rpc.com/?api-key={HELIUS_API_KEY}"
 SOL_MINT = "So11111111111111111111111111111111111111112"
 
-# Уменьшили для экономии памяти
+# Окно анализа — 7 дней
+ANALYSIS_DAYS = 7
 TX_LIMIT = 15
 
 _token_names = {}
 _token_prices = {}
 _sol_price_usd = None
 
-
-# ─────────────────────────────────────────────
-# Имена и цены
-# ─────────────────────────────────────────────
 
 def get_token_name(mint: str):
     if mint in _token_names:
@@ -98,10 +95,6 @@ def get_token_price_usd(mint: str):
         _token_prices[mint] = None
         return None
 
-
-# ─────────────────────────────────────────────
-# Балансы
-# ─────────────────────────────────────────────
 
 def get_sol_balance(address: str):
     payload = {"jsonrpc": "2.0", "id": 1, "method": "getBalance", "params": [address]}
@@ -180,10 +173,6 @@ def summarize_portfolio(address: str):
     }
 
 
-# ─────────────────────────────────────────────
-# Транзакции через ОБЫЧНЫЙ RPC
-# ─────────────────────────────────────────────
-
 def fetch_signatures(address: str, limit: int = TX_LIMIT):
     payload = {
         "jsonrpc": "2.0", "id": 1,
@@ -233,7 +222,6 @@ def fetch_all_txs(address: str, max_pages: int = 1):
 
         tx["timestamp"] = sig_info.get("blockTime") or 0
 
-        # Определяем тип
         if tx.get("meta"):
             pre = len(tx["meta"].get("preTokenBalances", []))
             post = len(tx["meta"].get("postTokenBalances", []))
@@ -244,10 +232,6 @@ def fetch_all_txs(address: str, max_pages: int = 1):
 
     return all_txs
 
-
-# ─────────────────────────────────────────────
-# Парсер через балансы
-# ─────────────────────────────────────────────
 
 def parse_swap_balances(tx, wallet_address):
     meta = tx.get("meta", {})
@@ -401,12 +385,7 @@ def analyze_pnl(txs, wallet_address):
     return closed, positions, buys_count, sells_count
 
 
-# ─────────────────────────────────────────────
-# Анализ кошелька
-# ─────────────────────────────────────────────
-
 def analyze_wallet(address, include_portfolio=True):
-    """Анализ кошелька. include_portfolio=False экономит память."""
     logger.info(f"🔍 Анализ: {address[:16]}...")
 
     portfolio = None
@@ -433,9 +412,11 @@ def analyze_wallet(address, include_portfolio=True):
         logger.info(f"  TX#{i+1}: type={tx_type}, preBal={pre_count}, postBal={post_count}")
 
     now = time.time()
-    txs_recent = [t for t in txs if (t.get("timestamp", 0) or t.get("blockTime", 0) or 0) > now - 3 * 86400]
+    # ОКНО 7 ДНЕЙ
+    cutoff = now - ANALYSIS_DAYS * 86400
+    txs_recent = [t for t in txs if (t.get("timestamp", 0) or t.get("blockTime", 0) or 0) > cutoff]
     swaps_recent_count = len(txs_recent)
-    logger.info(f"  📅 За 3 дня: {swaps_recent_count}")
+    logger.info(f"  📅 За {ANALYSIS_DAYS} дней: {swaps_recent_count}")
 
     closed, open_positions, buys, sells = analyze_pnl(txs_recent, address)
 
