@@ -268,12 +268,15 @@ def notify_new_buy(wallet: str, buy_info: dict):
     logger.info(f"🔔 Покупка: {wallet[:8]}... купил {token[:8]}...")
 
     try:
-        # Метрики кошелька
         from smart_money import analyze_wallet
         wallet_stats = analyze_wallet(wallet, include_portfolio=False)
         w_stats = wallet_stats.get("stats", {}) or {}
         wallet_win = w_stats.get("win_rate")
         wallet_pnl = w_stats.get("total_pnl_sol")
+        wallet_buys = w_stats.get("buys", 0)
+        wallet_sells = w_stats.get("sells", 0)
+        wallet_closed = w_stats.get("closed_positions", 0)
+        wallet_open = w_stats.get("open_positions", 0)
 
         result = evaluate_signal(token, wallet)
         verdict = result.get("verdict", "UNKNOWN")
@@ -318,6 +321,7 @@ def notify_new_buy(wallet: str, buy_info: dict):
                 f"💰 Потрачено: {sol_amount:.4f} SOL\n"
             )
 
+        # Метрики кошелька (если есть)
         if wallet_win is not None or wallet_pnl is not None:
             text += (
                 f"\n🧠 Метрики кошелька:\n"
@@ -325,7 +329,14 @@ def notify_new_buy(wallet: str, buy_info: dict):
                 f"└ PnL:      {wallet_pnl if wallet_pnl is not None else '—'} SOL\n"
             )
         else:
-            text += "\n⚠️ Нет данных о кошельке\n"
+            # Показываем активность
+            text += (
+                f"\n📊 Активность кошелька:\n"
+                f"├ Покупок:  {wallet_buys}\n"
+                f"├ Продаж:   {wallet_sells}\n"
+                f"├ Закрытых: {wallet_closed}\n"
+                f"└ Открытых: {wallet_open}\n"
+            )
 
         send_telegram_message(text)
     except Exception as e:
