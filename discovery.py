@@ -1,7 +1,7 @@
 """
 Discovery — автопоиск умных кошельков.
-Источник: DexScreener Boosts (с кешем на 1 час) + fallback.
-Авто-тюнинг MIN_TOKEN_APPEARANCE.
+Источник: DexScreener Boosts + GMGN CLI (для готовых метрик).
+Fallback: Helius RPC.
 """
 
 import os
@@ -9,6 +9,7 @@ import re
 import json
 import time
 import logging
+import subprocess
 import requests
 from dotenv import load_dotenv
 
@@ -30,16 +31,15 @@ SOL_MINT = "So11111111111111111111111111111111111111112"
 # ─────────────────────────────────────────────
 
 TOP_TOKENS_LIMIT = 10
-MIN_TOKEN_APPEARANCE = 1  # дефолт (может меняться авто)
+MIN_TOKEN_APPEARANCE = 1
 MIN_WIN_RATE = 45.0
 MIN_PNL_SOL = 5.0
 MAX_TRADES_PER_DAY = 200
 MAX_CANDIDATES = 15
 MAX_VALIDATE = 5
-
 AUTO_WATCH_MIN_TRADES = 5
 
-# Кеш DexScreener (1 час)
+# Кеш DexScreener
 _tokens_cache = {"data": None, "expires_at": 0}
 
 # История прогонов
@@ -59,6 +59,69 @@ FALLBACK_TOKENS = [
     {"mint": "7atgF8KQo4wJrD5ATGX7t1V2zVvykPJbFfNeVf1icFv1", "symbol": "MOTHER"},
     {"mint": "HgcxVs6kJhPAaGqnPNGaa7zYgNT49hJrLufiqcNMuYZT", "symbol": "SPCX"},
 ]
+
+
+# ─────────────────────────────────────────────
+# GMGN CLI
+# ─────────────────────────────────────────────
+
+def gmgn_portfolio_stats(wallet: str):
+    """
+    Вызывает npx gmgn-cli portfolio stats для кошелька.
+    Возвращает dict или None.
+    """
+    try:
+        result = subprocess.run(
+            ["npx", "gmgn-cli", "portfolio", "stats", "--chain", "sol", "--wallet", wallet],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if result.returncode != 0:
+            logger.debug(f"GMGN CLI failed для {wallet[:8]}: {result.stderr[:100]}")
+            return None
+
+        data = json.loads(result.stdout)
+        return data
+    except subprocess.TimeoutExpired:
+        logger.warning(f"GMGN CLI timeout для {wallet[:8]}")
+        return None
+    except json.JSONDecodeError as e:
+        logger.warning(f"GMGN CLI JSON error для {wallet[:8]}: {e}")
+        return None
+    except Exception as e:
+        logger.error(f"GMGN CLI ошибка: {e}")
+        return None
+
+
+def parse_gmgn_stats(data: dict):
+    """
+    Извлекает метрики из ответа GMGN.
+    Возвращает (winrate, realized_profit_sol, tags).
+    """
+    if not data:
+        return None, None, []
+
+    try:
+        realized_profit = float(data.get("realized_profit", 0) or 0)
+    except (ValueError, TypeError):
+        realized_profit = 0
+
+    winrate = None
+    pnl_stat = data.get("pnl_stat", {})
+    if isinstance(pnl_stat, dict):
+        wr = pnl_stat.get("winrate")
+        if wr is not None:
+            try:
+                winrate = float(wr) * 100  # GMGN отдаёт 0.3 = 30%
+            except (ValueError, TypeError):
+                winrate = None
+
+    tags = data.get("tags", [])
+    if not isinstance(tags, list):
+        tags = []
+
+    return winrate, realized_profit, tags
 
 
 # ─────────────────────────────────────────────
@@ -95,29 +158,21 @@ def auto_tune_min_appearance():
     history = load_discovery_history()
     if len(history) < 3:
         return 1
-
     recent = history[-5:]
     avg_valid = sum(h.get("valid", 0) for h in recent) / len(recent)
-
     if avg_valid > 8:
         logger.info(f"🎛️ Авто-тюнинг: MIN_APP=2 (avg_valid={avg_valid:.1f})")
         return 2
-    elif avg_valid < 2:
-        logger.info(f"🎛️ Авто-тюнинг: MIN_APP=1 (avg_valid={avg_valid:.1f})")
-        return 1
-    else:
-        return 1
+    return 1
 
 
 # ─────────────────────────────────────────────
-# DexScreener с кешем
+# DexScreener
 # ─────────────────────────────────────────────
 
 def get_trending_tokens(limit: int = TOP_TOKENS_LIMIT):
     global _tokens_cache
-
     if _tokens_cache["data"] and time.time() < _tokens_cache["expires_at"]:
-        logger.info(f"  Кеш DexScreener ({len(_tokens_cache['data'])} токенов)")
         return _tokens_cache["data"][:limit]
 
     url = "https://api.dexscreener.com/token-boosts/top/v1"
@@ -125,7 +180,6 @@ def get_trending_tokens(limit: int = TOP_TOKENS_LIMIT):
         r = requests.get(url, timeout=15)
         r.raise_for_status()
         data = r.json()
-
         solana_tokens = [item for item in data if item.get("chainId") == "solana"]
         solana_tokens.sort(key=lambda x: int(x.get("amount", 0) or 0), reverse=True)
 
@@ -138,15 +192,13 @@ def get_trending_tokens(limit: int = TOP_TOKENS_LIMIT):
         if tokens:
             _tokens_cache["data"] = tokens
             _tokens_cache["expires_at"] = time.time() + 3600
-            logger.info(f"  DexScreener (обновлено): {len(tokens)} токенов")
+            logger.info(f"  DexScreener: {len(tokens)} токенов")
             return tokens
     except Exception as e:
         logger.error(f"  Ошибка DexScreener: {e}")
 
     if _tokens_cache["data"]:
-        logger.warning("  Старый кеш (API упал)")
         return _tokens_cache["data"][:limit]
-
     return []
 
 
@@ -156,10 +208,7 @@ def get_tokens():
         for t in tokens:
             logger.info(f"    - BOOSTED: {t['mint'][:12]}...")
         return tokens
-
     logger.info(f"  Fallback: {len(FALLBACK_TOKENS)} токенов")
-    for t in FALLBACK_TOKENS:
-        logger.info(f"    - {t['symbol']}: {t['mint'][:12]}...")
     return list(FALLBACK_TOKENS)
 
 
@@ -188,9 +237,7 @@ def is_valid_format(addr: str) -> bool:
         return False
     if not BASE58_REGEX.match(addr):
         return False
-    if addr in EXCLUDED_ADDRESSES:
-        return False
-    if addr == SOL_MINT:
+    if addr in EXCLUDED_ADDRESSES or addr == SOL_MINT:
         return False
     return True
 
@@ -198,7 +245,6 @@ def is_valid_format(addr: str) -> bool:
 def is_helius_valid_address(addr: str) -> bool:
     if addr in _validated_addresses:
         return _validated_addresses[addr]
-
     url = f"https://api.helius.xyz/v0/addresses/{addr}/transactions"
     params = {"api-key": HELIUS_API_KEY, "limit": 5}
     try:
@@ -208,18 +254,15 @@ def is_helius_valid_address(addr: str) -> bool:
         except Exception:
             _validated_addresses[addr] = False
             return False
-
         if isinstance(data, dict):
             _validated_addresses[addr] = False
             return False
-
         if isinstance(data, list):
             if len(data) == 0:
                 _validated_addresses[addr] = False
                 return False
             _validated_addresses[addr] = True
             return True
-
         _validated_addresses[addr] = False
         return False
     except Exception:
@@ -252,7 +295,6 @@ def get_token_traders(token_mint: str, limit: int = 20):
             sig = sig_info.get("signature")
             if not sig:
                 continue
-
             tx_payload = {
                 "jsonrpc": "2.0", "id": 1,
                 "method": "getTransaction",
@@ -264,7 +306,6 @@ def get_token_traders(token_mint: str, limit: int = 20):
                 result = tx_data.get("result")
                 if not result:
                     continue
-
                 meta = result.get("meta", {})
                 post_balances = meta.get("postTokenBalances", [])
                 pre_balances = meta.get("preTokenBalances", [])
@@ -274,7 +315,6 @@ def get_token_traders(token_mint: str, limit: int = 20):
                     owner = b.get("owner")
                     if owner and is_valid_format(owner):
                         pre_map[owner] = float(b.get("uiTokenAmount", {}).get("uiAmount") or 0)
-
                 post_map = {}
                 for b in post_balances:
                     owner = b.get("owner")
@@ -288,15 +328,11 @@ def get_token_traders(token_mint: str, limit: int = 20):
                         buyers.add(owner)
                     elif post_amt < pre_amt and pre_amt > 0:
                         sellers.add(owner)
-
-            except Exception as e:
-                logger.debug(f"Ошибка парсинга tx: {e}")
+            except Exception:
                 continue
-
             time.sleep(0.05)
 
         return list(buyers), list(sellers)
-
     except Exception as e:
         logger.error(f"Ошибка get_token_traders: {e}")
         return [], []
@@ -316,7 +352,6 @@ def find_candidates(tokens: list, min_appearance: int = 1):
                 wallet_data[w] = {"count": 0, "role": "buyer", "tokens": []}
             wallet_data[w]["count"] += 1
             wallet_data[w]["tokens"].append(symbol)
-
         for w in sellers:
             if w not in wallet_data:
                 wallet_data[w] = {"count": 0, "role": "seller", "tokens": []}
@@ -324,7 +359,6 @@ def find_candidates(tokens: list, min_appearance: int = 1):
                 wallet_data[w]["role"] = "both"
             wallet_data[w]["count"] += 1
             wallet_data[w]["tokens"].append(symbol)
-
         time.sleep(0.2)
 
     role_priority = {"both": 0, "seller": 1, "buyer": 2}
@@ -333,7 +367,6 @@ def find_candidates(tokens: list, min_appearance: int = 1):
         for w, data in wallet_data.items()
         if data["count"] >= min_appearance
     ]
-
     active.sort(key=lambda x: (-x["count"], role_priority.get(x["role"], 99)))
 
     valid_active = []
@@ -342,61 +375,74 @@ def find_candidates(tokens: list, min_appearance: int = 1):
             valid_active.append(c)
         if len(valid_active) >= MAX_CANDIDATES:
             break
-
     return valid_active[:MAX_CANDIDATES]
 
 
 # ─────────────────────────────────────────────
-# Валидация
+# Валидация через GMGN (с fallback на Helius)
 # ─────────────────────────────────────────────
 
-def validate_candidate(wallet: str, min_win_rate: float, min_pnl_sol: float, max_trades_per_day: int):
-    try:
-        result = analyze_wallet(wallet, include_portfolio=False)
-        stats = result.get("stats", {}) or {}
-        win_rate = stats.get("win_rate")
-        pnl = stats.get("total_pnl_sol")
-        closed = stats.get("closed_with_sol", 0)
-        open_pos = stats.get("open_positions", 0)
-        buys = stats.get("buys", 0)
-        sells = stats.get("sells", 0)
-
-        total_trades = buys + sells
-        trades_per_day = total_trades / ANALYSIS_DAYS if total_trades else 0
-
+def validate_candidate(wallet: str):
+    """
+    Проверяет кандидата через GMGN CLI.
+    Если GMGN не отвечает — fallback на Helius.
+    """
+    # Попытка 1: GMGN
+    data = gmgn_portfolio_stats(wallet)
+    if data:
+        winrate, realized_profit, tags = parse_gmgn_stats(data)
         logger.info(
-            f"    📊 {wallet[:16]}: buys={buys}, sells={sells}, "
-            f"closed={closed}, open={open_pos}, win={win_rate}, pnl={pnl}"
+            f"    📊 {wallet[:16]} (GMGN): win={winrate}, pnl={realized_profit} SOL, tags={tags}"
         )
 
-        if trades_per_day > max_trades_per_day:
-            logger.info(f"    ⏭️  бот ({trades_per_day:.0f}/день)")
+        if winrate is not None and winrate < MIN_WIN_RATE:
+            logger.info(f"    ⏭️  win {winrate:.0f}% < {MIN_WIN_RATE}%")
             return None
 
-        if buys == 0 and sells == 0:
-            logger.info(f"    ⏭️  нет активности")
+        if realized_profit is not None and realized_profit < MIN_PNL_SOL:
+            logger.info(f"    ⏭️  PnL {realized_profit:.2f} < {MIN_PNL_SOL}")
             return None
-
-        if closed and win_rate is not None and win_rate < min_win_rate:
-            logger.info(f"    ⏭️  win {win_rate:.0f}% < {min_win_rate}%")
-            return None
-
-        if closed and pnl is not None and pnl < min_pnl_sol:
-            logger.info(f"    ⏭️  PnL {pnl:.4f} < {min_pnl_sol}")
-            return None
-
-        auto_watch = (buys + sells) >= AUTO_WATCH_MIN_TRADES
 
         return {
-            "wallet": wallet, "win_rate": win_rate, "pnl_sol": pnl,
-            "closed": closed, "open_positions": open_pos,
-            "buys": buys, "sells": sells,
-            "trades_per_day": round(trades_per_day, 1),
-            "auto_watch": auto_watch,
+            "wallet": wallet,
+            "win_rate": winrate,
+            "pnl_sol": realized_profit,
+            "tags": tags,
+            "source": "gmgn",
         }
-    except Exception as e:
-        logger.error(f"Ошибка валидации {wallet}: {e}")
+
+    # Fallback: Helius
+    logger.info(f"    ⚠️ GMGN недоступен, fallback на Helius для {wallet[:16]}...")
+    result = analyze_wallet(wallet, include_portfolio=False)
+    stats = result.get("stats", {}) or {}
+    win_rate = stats.get("win_rate")
+    pnl = stats.get("total_pnl_sol")
+    closed = stats.get("closed_with_sol", 0)
+    open_pos = stats.get("open_positions", 0)
+    buys = stats.get("buys", 0)
+    sells = stats.get("sells", 0)
+
+    if buys == 0 and sells == 0:
         return None
+
+    if closed and win_rate is not None and win_rate < MIN_WIN_RATE:
+        return None
+    if closed and pnl is not None and pnl < MIN_PNL_SOL:
+        return None
+
+    auto_watch = (buys + sells) >= AUTO_WATCH_MIN_TRADES
+    return {
+        "wallet": wallet,
+        "win_rate": win_rate,
+        "pnl_sol": pnl,
+        "closed": closed,
+        "open_positions": open_pos,
+        "buys": buys,
+        "sells": sells,
+        "trades_per_day": round((buys + sells) / ANALYSIS_DAYS, 1) if (buys + sells) else 0,
+        "auto_watch": auto_watch,
+        "source": "helius",
+    }
 
 
 # ─────────────────────────────────────────────
@@ -415,7 +461,6 @@ def _discover_impl():
     logger.info("=" * 60)
     logger.info("🔍 АВТОПОИСК УМНЫХ КОШЕЛЬКОВ")
     logger.info(f"   win ≥ {MIN_WIN_RATE}%, PnL ≥ {MIN_PNL_SOL} SOL")
-    logger.info(f"   Окно анализа: {ANALYSIS_DAYS} дней")
     logger.info("=" * 60)
 
     logger.info("📊 Шаг 1: Получаю токены...")
@@ -425,48 +470,37 @@ def _discover_impl():
 
     logger.info("")
     logger.info("👥 Шаг 2: Ищу трейдеров...")
-
     dynamic_min_app = auto_tune_min_appearance()
-    logger.info(f"  🎛️ MIN_APPEARANCE: {dynamic_min_app} (авто)")
-
     candidates = find_candidates(tokens, min_appearance=dynamic_min_app)
-
     if not candidates:
         save_discovery_history(0, 0)
         return {"error": "Не найдено активных кандидатов"}
 
     logger.info("")
-    logger.info(f"  Найдено {len(candidates)} валидных кандидатов")
-
-    logger.info("")
-    logger.info(f"🧠 Шаг 3: Проверяю через Smart Money (топ-{MAX_VALIDATE})...")
+    logger.info(f"🧠 Шаг 3: Проверяю через GMGN (топ-{MAX_VALIDATE})...")
     valid = []
     for i, cand in enumerate(candidates[:MAX_VALIDATE]):
         wallet = cand["wallet"]
         logger.info(f"  [{i+1}/{min(len(candidates), MAX_VALIDATE)}] {wallet}")
-
-        info = validate_candidate(wallet, MIN_WIN_RATE, MIN_PNL_SOL, MAX_TRADES_PER_DAY)
+        info = validate_candidate(wallet)
         if info:
             info["role"] = cand["role"]
             info["tokens_bought"] = cand["tokens"]
             valid.append(info)
-            logger.info(f"    ✅ ПОДХОДИТ! buys={info['buys']}, sells={info['sells']}, auto_watch={info['auto_watch']}")
+            logger.info(f"    ✅ ПОДХОДИТ!")
         time.sleep(0.3)
 
     logger.info("")
     logger.info(f"✅ Найдено {len(valid)} валидных кошельков")
-
-    # Сохраняем историю
     save_discovery_history(len(valid), len(candidates))
 
+    # Сортировка: сначала с GMGN, потом по PnL
     def sort_key(x):
-        activity = x.get("buys", 0) + x.get("sells", 0)
-        has_pnl = 1 if (x["pnl_sol"] is not None and x["pnl_sol"] > 0) else 0
-        return (activity, has_pnl)
+        source = 0 if x.get("source") == "gmgn" else 1
+        pnl = x.get("pnl_sol") or 0
+        return (source, -pnl)
 
-    valid.sort(key=sort_key, reverse=True)
-
-    logger.info("🏁 ФИНАЛ")
+    valid.sort(key=sort_key)
 
     return {
         "tokens_checked": len(tokens),

@@ -1,0 +1,119 @@
+{
+  "version": 1,
+  "skills": {
+    "gmgn-callout": {
+      "source": "GMGNAI/gmgn-skills",
+      "sourceType": "github",
+      "skillPath": "skills/gmgn-callout/SKILL.md",
+      "computedHash": "10f31561d5a832f3c57fa4d27c989abe14b6943988da549621f76bf0c394f43e"
+    },
+    "gmgn-callout-score": {
+      "source": "GMGNAI/gmgn-skills",
+      "sourceType": "github",
+      "skillPath": "skills/gmgn-callout-score/SKILL.md",
+      "computedHash": "8e86842623dc6137408cd214619fe4f477cce932570fe1e3e3833c176c61a299"
+    },
+    "gmgn-contract-dd": {
+      "source": "GMGNAI/gmgn-skills",
+      "sourceType": "github",
+      "skillPath": "skills/gmgn-contract-dd/SKILL.md",
+      "computedHash": "4bd95bd2c110775f639119597a61e6610d48cefbed51ca252aac3acb4ba6ba0a"
+    },
+    "gmgn-cooking": {
+      "source": "GMGNAI/gmgn-skills",
+      "sourceType": "github",
+      "skillPath": "skills/gmgn-cooking/SKILL.md",
+      "computedHash": "af91bca93abd3e229e73b2a435a82a058023a013151b403ad8d29b609fd4e7a4"
+    },
+    "gmgn-dev-score": {
+      "source": "GMGNAI/gmgn-skills",
+      "sourceType": "github",
+      "skillPath": "skills/gmgn-dev-score/SKILL.md",
+      "computedHash": "72245866339f99c1a981ce55681102cf3fe1ae4f61a2a178680d8692e6e95e4b"
+    },
+    "gmgn-heat-rank": {
+      "source": "GMGNAI/gmgn-skills",
+      "sourceType": "github",
+      "skillPath": "skills/gmgn-heat-rank/SKILL.md",
+      "computedHash": "f555a4e826bd58086e188e32ce4fbb45866eb4474870f797dd3a0f0e7d0012f4"
+    },
+    "gmgn-holder-analysis": {
+      "source": "GMGNAI/gmgn-skills",
+      "sourceType": "github",
+      "skillPath": "skills/gmgn-holder-analysis/SKILL.md",
+      "computedHash": "e34bc98d9d2c003ffafa3fc02bd0a427179c68b093627bc37c208b356aac660c"
+    },
+    "gmgn-kline-pattern": {
+      "source": "GMGNAI/gmgn-skills",
+      "sourceType": "github",
+      "skillPath": "skills/gmgn-kline-pattern/SKILL.md",
+      "computedHash": "c92cf856c3d2b4df2193650e5bd15eb7e78696bfc7e65318ae6fa18bf69d2b76"
+    },
+    "gmgn-market": {
+      "source": "GMGNAI/gmgn-skills",
+      "sourceType": "github",
+      "skillPath": "skills/gmgn-market/SKILL.md",
+      "computedHash": "53cf5defe82ade85c0d08d7eb207a79c672a23f965e37da082c1744651271f82"
+    },
+    "gmgn-narrative": {
+      "source": "GMGNAI/gmgn-skills",
+      "sourceType": "github",
+      "skillPath": "skills/gmgn-narrative/SKILL.md",
+      "computedHash": "bf666442513fcecd287a8fa8a081e597f22768f893225dd7a7dffb0c9f6ec9a7"
+    },
+    "gmgn-portfolio": {
+      "source": "GMGNAI/gmgn-skills",
+      "sourceType": "github",
+      "skillPath": "skills/gmgn-portfolio/SKILL.md",
+      "computedHash": "9522aca538015e823d20ef760fafe4796aac4c9c8f9187d39b7b58f4e34cf0a2"
+    },
+    "gmgn-swap": {
+      "source": "GMGNAI/gmgn-skills",
+      "sourceType": "github",
+      "skillPath": "skills/gmgn-swap/SKILL.md",
+      "computedHash": "e2dcc5db2c6cf1c74adb4ba55f483ad1681069acb9c5714b5d3329294835b2b7"
+    },
+    "gmgn-token": {
+      "source": "GMGNAI/gmgn-skills",
+      "sourceType": "github",
+      "skillPath": "skills/gmgn-token/SKILL.md",
+      "computedHash": "ce486806658a28f02c3e11dcaf5a460df8c21b81f3e1c045e8b68af0facf52fe"
+    },
+    "gmgn-token-buy": {
+      "source": "GMGNAI/gmgn-skills",
+      "sourceType": "github",
+      "skillPath": "skills/gmgn-token-buy/SKILL.md",
+      "computedHash": "144c9cd4c369288e8c1b6cb3d0d6f8317c8364a621bde52213a7a8457901799d"
+    },
+    "gmgn-track": {
+      "source": "GMGNAI/gmgn-skills",
+      "sourceType": "github",
+      "skillPath": "skills/gmgn-track/SKILL.md",
+      "computedHash": "46e6257a413eeb9b711f6e7eb76ce5057073645ee6c5a60e8a2fd2faaba0895b"
+    },
+    "gmgn-wallet-analysis": {
+      "source": "GMGNAI/gmgn-skills",
+      "sourceType": "github",
+      "skillPath": "skills/gmgn-wallet-analysis/SKILL.md",
+      "computedHash": "3ced72b3cdbccec79035b9b7ba9855baf6a00985d79346b512687f64a24ef408"
+    },
+    "gmgn-wallet-review": {
+      "source": "GMGNAI/gmgn-skills",
+      "sourceType": "github",
+      "skillPath": "skills/gmgn-wallet-review/SKILL.md",
+      "computedHash": "514278e5b31c6cf6d875a54b232814d21da4f3b6cbd2575d9348df4613d44033"
+    },
+    "gmgn-wallet-score": {
+      "source": "GMGNAI/gmgn-skills",
+      "sourceType": "github",
+      "skillPath": "skills/gmgn-wallet-score/SKILL.md",
+      "computedHash": "fe3348aa7c3b84e2b6c0813853ff7052e3c47b509d2fb9f5b7db63cf7eeddd02"
+    },
+    "gmgn-wallet-style": {
+      "source": "GMGNAI/gmgn-skills",
+      "sourceType": "github",
+      "skillPath": "skills/gmgn-wallet-style/SKILL.md",
+      "computedHash": "e31cc5d2a6c80e838aa4c14e271a0680f8ff9a7c938b36df032dee4582aad713"
+    }
+  }
+}
