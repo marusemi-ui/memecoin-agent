@@ -210,7 +210,6 @@ def parse_buy(tx, wallet_address):
 
 
 def parse_sell(tx, wallet_address):
-    """Определяет продажу токена."""
     if tx.get("type") != "SWAP":
         return None
     transfers = tx.get("tokenTransfers", [])
@@ -269,11 +268,17 @@ def notify_new_buy(wallet: str, buy_info: dict):
     logger.info(f"🔔 Покупка: {wallet[:8]}... купил {token[:8]}...")
 
     try:
+        # Метрики кошелька
+        from smart_money import analyze_wallet
+        wallet_stats = analyze_wallet(wallet, include_portfolio=False)
+        w_stats = wallet_stats.get("stats", {}) or {}
+        wallet_win = w_stats.get("win_rate")
+        wallet_pnl = w_stats.get("total_pnl_sol")
+
         result = evaluate_signal(token, wallet)
         verdict = result.get("verdict", "UNKNOWN")
         confidence = result.get("confidence", 0.0) or 0.0
         breakdown = result.get("breakdown", {}) or {}
-        sm_stats = result.get("smart_money_stats", {}) or {}
 
         if verdict == "REJECT" and not NOTIFY_REJECT:
             return
@@ -304,21 +309,23 @@ def notify_new_buy(wallet: str, buy_info: dict):
                 f"├ Smart Money: {fmt(breakdown.get('smart_money'))}\n"
                 f"└ Liquidity:   {fmt(breakdown.get('liquidity'))}\n"
             )
-            win_rate = sm_stats.get("win_rate")
-            pnl = sm_stats.get("total_pnl_sol")
-            if win_rate is not None or pnl is not None:
-                text += (
-                    f"\n🧠 Smart Money:\n"
-                    f"├ Win rate: {win_rate if win_rate is not None else '—'}%\n"
-                    f"└ PnL:      {pnl if pnl is not None else '—'} SOL\n"
-                )
         else:
             text = (
                 f"{emoji} Слабый сигнал (покупка)\n"
                 f"Confidence: {confidence:.3f}\n\n"
                 f"🪙 Токен: {token}\n"
+                f"👤 Кошелёк: {wallet}\n"
                 f"💰 Потрачено: {sol_amount:.4f} SOL\n"
             )
+
+        if wallet_win is not None or wallet_pnl is not None:
+            text += (
+                f"\n🧠 Метрики кошелька:\n"
+                f"├ Win rate: {wallet_win if wallet_win is not None else '—'}%\n"
+                f"└ PnL:      {wallet_pnl if wallet_pnl is not None else '—'} SOL\n"
+            )
+        else:
+            text += "\n⚠️ Нет данных о кошельке\n"
 
         send_telegram_message(text)
     except Exception as e:
@@ -326,7 +333,6 @@ def notify_new_buy(wallet: str, buy_info: dict):
 
 
 def notify_sell(wallet: str, sell_info: dict):
-    """Уведомление о продаже."""
     token = sell_info["token"]
     sol_amount = sell_info["sol_amount"]
     logger.info(f"💸 Продажа: {wallet[:8]}... продал {token[:8]}...")
